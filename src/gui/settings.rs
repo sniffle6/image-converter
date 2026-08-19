@@ -4,7 +4,8 @@ use rfd::FileDialog;
 
 use crate::{
     app::{ConvertalotApp, ResizeChoice},
-    theme::{HexColor, ThemeMode, ThemeTokens},
+    theme::{HexColor, ThemeTokens},
+    theme_catalog::{DirtyDecision, ThemeId, WindowMaterial},
     windows,
 };
 
@@ -13,7 +14,7 @@ pub(crate) fn conversion_sidebar(
     root: &mut egui::Ui,
     context: &egui::Context,
 ) {
-    let tokens = app.preferences.tokens();
+    let tokens = app.tokens();
     let panel_fill = app.backdrop_fill(tokens.panel);
     egui::Panel::right("conversion-settings")
         .resizable(false)
@@ -147,32 +148,10 @@ pub(crate) fn conversion_sidebar(
 
                 ui.add_space(5.0);
                 section(ui, "Save to");
-                destination_field(ui, app, &tokens, true);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_sized([163.0, 29.0], egui::Button::new("Choose folder"))
-                        .clicked()
-                        && let Some(folder) = FileDialog::new()
-                            .set_title("Choose output folder")
-                            .pick_folder()
-                    {
-                        app.output_dir = Some(folder);
-                        changed = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            app.output_dir.is_some(),
-                            egui::Button::new("Reset").min_size(egui::vec2(59.0, 29.0)),
-                        )
-                        .clicked()
-                    {
-                        app.output_dir = None;
-                        changed = true;
-                    }
-                });
+                changed |= editable_destination(ui, app);
                 muted(
                     ui,
-                    "Defaults to a converted folder beside each source.",
+                    "Leave blank for a converted folder beside each source.",
                     &tokens,
                 );
                 ui.add_space(4.0);
@@ -411,12 +390,15 @@ fn quality_slider(ui: &mut egui::Ui, quality: &mut u8, tokens: &ThemeTokens) -> 
 }
 
 fn jpeg_background(ui: &mut egui::Ui, app: &mut ConvertalotApp, tokens: &ThemeTokens) -> bool {
+    const CONTROL_HEIGHT: f32 = 28.0;
+
     let mut changed = false;
     ui.horizontal(|ui| {
         if ui
             .add_sized(
-                [49.0, 24.0],
-                egui::Button::selectable(app.jpeg_hex.eq_ignore_ascii_case("#FFFFFF"), "White"),
+                [49.0, CONTROL_HEIGHT],
+                egui::Button::selectable(app.jpeg_hex.eq_ignore_ascii_case("#FFFFFF"), "White")
+                    .frame_when_inactive(true),
             )
             .clicked()
         {
@@ -425,8 +407,9 @@ fn jpeg_background(ui: &mut egui::Ui, app: &mut ConvertalotApp, tokens: &ThemeTo
         }
         if ui
             .add_sized(
-                [46.0, 24.0],
-                egui::Button::selectable(app.jpeg_hex.eq_ignore_ascii_case("#000000"), "Black"),
+                [46.0, CONTROL_HEIGHT],
+                egui::Button::selectable(app.jpeg_hex.eq_ignore_ascii_case("#000000"), "Black")
+                    .frame_when_inactive(true),
             )
             .clicked()
         {
@@ -436,7 +419,10 @@ fn jpeg_background(ui: &mut egui::Ui, app: &mut ConvertalotApp, tokens: &ThemeTo
         let custom = !app.jpeg_hex.eq_ignore_ascii_case("#FFFFFF")
             && !app.jpeg_hex.eq_ignore_ascii_case("#000000");
         if ui
-            .add_sized([58.0, 24.0], egui::Button::selectable(custom, "Custom"))
+            .add_sized(
+                [58.0, CONTROL_HEIGHT],
+                egui::Button::selectable(custom, "Custom").frame_when_inactive(true),
+            )
             .clicked()
             && !custom
         {
@@ -446,14 +432,21 @@ fn jpeg_background(ui: &mut egui::Ui, app: &mut ConvertalotApp, tokens: &ThemeTo
         let parsed = app.jpeg_hex.parse::<RgbColor>();
         let rgb = parsed.unwrap_or(RgbColor::WHITE).components();
         let mut picked = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-        if ui.color_edit_button_srgba(&mut picked).changed() {
-            app.jpeg_hex = format!("#{:02X}{:02X}{:02X}", picked.r(), picked.g(), picked.b());
+        let color_response = ui
+            .scope(|ui| {
+                ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                ui.color_edit_button_srgba(&mut picked)
+            })
+            .inner;
+        if color_response.changed() {
+            let [red, green, blue, _] = picked.to_srgba_unmultiplied();
+            app.jpeg_hex = format!("#{red:02X}{green:02X}{blue:02X}");
             changed = true;
         }
     });
     let response = ui.add_sized(
         [ui.available_width(), 24.0],
-        egui::TextEdit::singleline(&mut app.jpeg_hex)
+        centered_monospace_text_edit(&mut app.jpeg_hex)
             .font(egui::TextStyle::Monospace)
             .hint_text("#RRGGBB"),
     );
@@ -525,6 +518,43 @@ fn destination_field(
                 }
             });
         });
+}
+
+fn editable_destination(ui: &mut egui::Ui, app: &mut ConvertalotApp) -> bool {
+    let mut committed = false;
+    ui.horizontal(|ui| {
+        let browse_width = 68.0;
+        let field_width =
+            (ui.available_width() - browse_width - ui.spacing().item_spacing.x).max(100.0);
+        let response = ui.add_sized(
+            [field_width, 29.0],
+            centered_tall_monospace_text_edit(&mut app.output_dir_text)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("Output folder path"),
+        );
+        if response.changed() {
+            app.output_dir = if app.output_dir_text.trim().is_empty() {
+                None
+            } else {
+                Some(app.output_dir_text.clone().into())
+            };
+        }
+        committed |= response.lost_focus()
+            || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+
+        if ui
+            .add_sized([browse_width, 29.0], egui::Button::new("Browse…"))
+            .clicked()
+            && let Some(folder) = FileDialog::new()
+                .set_title("Choose output folder")
+                .pick_folder()
+        {
+            app.output_dir_text = folder.display().to_string();
+            app.output_dir = Some(folder);
+            committed = true;
+        }
+    });
+    committed
 }
 
 fn setting_toggle(ui: &mut egui::Ui, value: &mut bool, label: &str, tokens: &ThemeTokens) -> bool {
@@ -600,20 +630,39 @@ fn duplicate(
     label: &str,
 ) -> bool {
     let selected = *current == value;
-    let visuals = ui.visuals();
-    ui.add_sized(
-        [105.0, 26.0],
-        egui::Button::new(RichText::new(label).monospace().size(10.5))
-            .fill(visuals.widgets.inactive.bg_fill)
-            .stroke(if selected {
-                Stroke::new(2.0, visuals.selection.bg_fill)
-            } else {
-                visuals.widgets.inactive.bg_stroke
-            }),
-    )
-    .clicked()
-    .then(|| *current = value)
-    .is_some()
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(105.0, 26.0), egui::Sense::click());
+    let activated = response.clicked()
+        || (response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            }));
+    let interactive = ui.style().interact(&response);
+    let stroke = if selected || response.has_focus() {
+        Stroke::new(2.0, ui.visuals().selection.bg_fill)
+    } else {
+        interactive.bg_stroke
+    };
+    ui.painter().rect(
+        rect,
+        6.0,
+        ui.visuals().widgets.inactive.bg_fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center() + egui::vec2(0.0, 1.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::monospace(10.5),
+        interactive.text_color(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
+    if activated {
+        *current = value;
+    }
+    activated
 }
 
 fn section(ui: &mut egui::Ui, text: &str) {
@@ -631,462 +680,574 @@ fn section(ui: &mut egui::Ui, text: &str) {
 }
 
 pub(crate) fn appearance(app: &mut ConvertalotApp, root: &mut egui::Ui, context: &egui::Context) {
-    let tokens = app.preferences.tokens();
-    let panel_fill = app.backdrop_fill(tokens.panel);
+    let tokens = app.tokens();
     let background_fill = app.backdrop_fill(tokens.background);
-    egui::Panel::left("settings-navigation")
-        .resizable(false)
-        .exact_size(158.0)
-        .frame(
-            egui::Frame::new()
-                .fill(panel_fill)
-                .stroke(Stroke::new(1.0, tokens.border.egui()))
-                .inner_margin(egui::Margin::symmetric(12, 16)),
-        )
-        .show(root, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            ui.add_sized(
-                [134.0, 31.0],
-                egui::Button::new(
-                    RichText::new("Appearance")
-                        .strong()
-                        .color(tokens.on_accent.egui()),
-                )
-                .fill(tokens.accent.egui())
-                .stroke(Stroke::NONE)
-                .corner_radius(5.0),
-            );
-            for name in ["Conversion", "File names", "Performance", "About"] {
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(RichText::new(name).size(12.0))
-                        .frame(false)
-                        .min_size(egui::vec2(134.0, 30.0)),
-                );
-            }
-        });
     egui::CentralPanel::default()
         .frame(
             egui::Frame::new()
                 .fill(background_fill)
-                .inner_margin(egui::Margin::symmetric(20, 14)),
+                .inner_margin(egui::Margin::symmetric(22, 14)),
         )
         .show(root, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(10.0, 5.0);
-            let content_width =
-                (ui.ctx().input(|input| input.content_rect().width()) - 198.0).clamp(520.0, 760.0);
-            ui.set_max_width(content_width);
-            ui.label(
-                RichText::new("Theme")
-                    .strong()
-                    .size(15.0)
-                    .color(tokens.text.egui()),
-            );
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                let card_width = ((content_width - 24.0) / 3.0).floor();
-                theme_card(
-                    ui,
-                    app,
-                    context,
-                    ThemeMode::Light,
-                    "Light",
-                    ThemeTokens::light(),
-                    card_width,
-                );
-                theme_card(
-                    ui,
-                    app,
-                    context,
-                    ThemeMode::Dark,
-                    "Dark",
-                    ThemeTokens::dark(),
-                    card_width,
-                );
-                theme_card(
-                    ui,
-                    app,
-                    context,
-                    ThemeMode::Glass,
-                    "Glass",
-                    ThemeTokens::glass(),
-                    card_width,
-                );
-            });
-
-            ui.add_space(5.0);
-            glass_settings(app, ui, &tokens, content_width);
-            ui.add_space(5.0);
-
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Colors")
-                        .strong()
-                        .size(15.0)
-                        .color(tokens.text.egui()),
-                );
-                ui.label(
-                    RichText::new("Editing any colour starts your own theme")
-                        .size(11.0)
-                        .color(tokens.muted.egui()),
-                );
-            });
-
-            let editor_height = (ui.available_height() - 54.0).clamp(225.0, 250.0);
-            let mut custom = app.preferences.custom_tokens.clone();
-            let mut changed = false;
-            ui.allocate_ui_with_layout(
-                egui::vec2(content_width, editor_height),
-                egui::Layout::left_to_right(egui::Align::TOP),
-                |ui| {
-                    ui.set_min_size(egui::vec2(content_width, editor_height));
-                    let column_gap = 24.0;
-                    let column_width = (content_width - column_gap) / 2.0;
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(column_width, editor_height),
-                        egui::Layout::top_down(egui::Align::LEFT),
-                        |ui| {
-                            ui.set_max_width(column_width);
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            token_group_heading(ui, "SURFACES", &tokens);
-                            changed |= token_row(
-                                ui,
-                                0,
-                                "desktop",
-                                &mut custom.canvas,
-                                &mut app.theme_hex[0],
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width((ui.available_width() - 8.0).max(640.0));
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("APPEARANCE")
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(tokens.accent.egui()),
                             );
-                            changed |= token_row(
-                                ui,
-                                1,
-                                "window",
-                                &mut custom.background,
-                                &mut app.theme_hex[1],
+                            ui.label(
+                                RichText::new("Theme library")
+                                    .strong()
+                                    .size(19.0)
+                                    .color(tokens.text.egui()),
                             );
-                            changed |=
-                                token_row(ui, 2, "panel", &mut custom.panel, &mut app.theme_hex[2]);
-                            changed |= token_row(
-                                ui,
-                                3,
-                                "control",
-                                &mut custom.control,
-                                &mut app.theme_hex[3],
-                            );
-                            changed |=
-                                token_row(ui, 4, "field", &mut custom.field, &mut app.theme_hex[4]);
-                            changed |= token_row(
-                                ui,
-                                5,
-                                "row stripe",
-                                &mut custom.row_alt,
-                                &mut app.theme_hex[5],
-                            );
-                            changed |= token_row(
-                                ui,
-                                6,
-                                "border",
-                                &mut custom.border,
-                                &mut app.theme_hex[6],
-                            );
-                        },
-                    );
-                    ui.add_space(column_gap);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(column_width, editor_height),
-                        egui::Layout::top_down(egui::Align::LEFT),
-                        |ui| {
-                            ui.set_max_width(column_width);
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            token_group_heading(ui, "TEXT", &tokens);
-                            changed |=
-                                token_row(ui, 7, "text", &mut custom.text, &mut app.theme_hex[7]);
-                            changed |= token_row(
-                                ui,
-                                8,
-                                "muted text",
-                                &mut custom.muted,
-                                &mut app.theme_hex[8],
-                            );
-                            token_group_heading(ui, "ACCENT & STATUS", &tokens);
-                            changed |= token_row(
-                                ui,
-                                9,
-                                "accent",
-                                &mut custom.accent,
-                                &mut app.theme_hex[9],
-                            );
-                            changed |= token_row(
-                                ui,
-                                10,
-                                "on accent",
-                                &mut custom.on_accent,
-                                &mut app.theme_hex[10],
-                            );
-                            changed |= token_row(
-                                ui,
-                                11,
-                                "error",
-                                &mut custom.danger,
-                                &mut app.theme_hex[11],
-                            );
-                            token_group_heading(ui, "TITLE BAR", &tokens);
-                            changed |= token_row(
-                                ui,
-                                12,
-                                "title bar",
-                                &mut custom.title,
-                                &mut app.theme_hex[12],
-                            );
-                            changed |= token_row(
-                                ui,
-                                13,
-                                "title text",
-                                &mut custom.title_text,
-                                &mut app.theme_hex[13],
-                            );
-                            changed |= token_row(
-                                ui,
-                                14,
-                                "title muted",
-                                &mut custom.title_muted,
-                                &mut app.theme_hex[14],
-                            );
-                            changed |= token_row(
-                                ui,
-                                15,
-                                "title rule",
-                                &mut custom.title_rule,
-                                &mut app.theme_hex[15],
-                            );
-                            changed |= token_row(
-                                ui,
-                                16,
-                                "title control",
-                                &mut custom.title_control,
-                                &mut app.theme_hex[16],
-                            );
-                        },
-                    );
-                },
-            );
-            app.preferences.custom_tokens = custom;
-            if changed {
-                app.preferences.active_theme = ThemeMode::Custom;
-                app.preferences.apply(context);
-                app.theme_status = "Unsaved — click Save to keep it".into();
-            }
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_sized(
-                        [153.0, 34.0],
-                        egui::Button::new(
-                            RichText::new("Save as my theme")
-                                .strong()
-                                .color(tokens.on_accent.egui()),
-                        )
-                        .fill(tokens.accent.egui())
-                        .stroke(Stroke::NONE),
-                    )
-                    .clicked()
-                {
-                    app.preferences.active_theme = ThemeMode::Custom;
-                    app.preferences.apply(context);
-                    app.theme_status = match app.preferences.save() {
-                        Ok(()) => "Saved as My theme".into(),
-                        Err(e) => format!("Could not save: {e}"),
-                    };
-                }
-                if ui
-                    .add_sized([135.0, 34.0], egui::Button::new("Reset to default"))
-                    .clicked()
-                {
-                    app.preferences = crate::theme::Preferences::default();
-                    app.preferences.apply(context);
-                    app.theme_hex = token_values(&app.preferences.custom_tokens);
-                    let _ = app.preferences.save();
-                    app.theme_status = "Reset to the built-in dark theme".into();
-                }
-                let default_status = match app.preferences.active_theme {
-                    ThemeMode::Light => "Using the built-in light theme",
-                    ThemeMode::Dark => "Using the built-in dark theme",
-                    ThemeMode::Glass => "Using the built-in glass theme",
-                    ThemeMode::Custom => "Using My theme",
-                };
-                let status = if app.theme_status.is_empty() {
-                    default_status
-                } else {
-                    &app.theme_status
-                };
-                let status_width = (content_width - 318.0).max(120.0);
-                let (status_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(status_width, 34.0), egui::Sense::hover());
-                ui.painter().text(
-                    status_rect.right_center(),
-                    egui::Align2::RIGHT_CENTER,
-                    status,
-                    egui::FontId::monospace(10.0),
-                    tokens.muted.egui(),
-                );
-            });
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Back to converter").clicked() {
+                                app.screen = crate::app::Screen::Workbench;
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    theme_selector(app, ui, context, &tokens);
+                    ui.add_space(8.0);
+                    theme_editor(app, ui, context, &tokens);
+                });
         });
 }
 
-fn glass_settings(app: &mut ConvertalotApp, ui: &mut egui::Ui, tokens: &ThemeTokens, width: f32) {
-    let panel_fill = tokens.panel.egui();
+fn theme_selector(
+    app: &mut ConvertalotApp,
+    ui: &mut egui::Ui,
+    context: &egui::Context,
+    tokens: &ThemeTokens,
+) {
     egui::Frame::new()
-        .fill(panel_fill)
+        .fill(tokens.panel.egui())
         .stroke(Stroke::new(1.0, tokens.border.egui()))
         .corner_radius(9.0)
-        .inner_margin(egui::Margin::symmetric(16, 10))
+        .inner_margin(egui::Margin::symmetric(14, 10))
         .show(ui, |ui| {
-            ui.set_width(width - 32.0);
-            section(ui, "Glass");
             ui.horizontal(|ui| {
-                ui.add_sized(
-                    [102.0, 18.0],
-                    egui::Label::new(
-                        RichText::new("Blur")
-                            .size(11.0)
-                            .color(tokens.muted.egui()),
-                    )
-                    .halign(egui::Align::LEFT),
-                );
-                let slider_width = (ui.available_width() - 42.0).max(120.0);
-                if ui
-                    .add_sized(
-                        [slider_width, 18.0],
-                        egui::Slider::new(&mut app.preferences.glass_blur, 0..=64)
-                            .show_value(false),
-                    )
-                    .on_hover_text("Adjusts the native Gaussian blur behind the window")
-                    .changed()
-                {
-                    let _ = app.preferences.save();
-                }
                 ui.label(
-                    RichText::new(format!("{}px", app.preferences.glass_blur))
-                        .monospace()
-                        .size(10.0)
+                    RichText::new("Theme")
+                        .strong()
+                        .size(12.0)
                         .color(tokens.text.egui()),
                 );
+                let selected = app.preferences.themes.selected_label();
+                let choices = app.preferences.themes.choices();
+                egui::ComboBox::from_id_salt("theme-library-selector")
+                    .width((ui.available_width() - 145.0).clamp(250.0, 430.0))
+                    .height(280.0)
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        ui.label(
+                            RichText::new("BUILT-IN")
+                                .monospace()
+                                .size(9.0)
+                                .color(tokens.muted.egui()),
+                        );
+                        for choice in choices.iter().filter(|choice| choice.built_in) {
+                            let selected = app.preferences.themes.selected() == choice.id;
+                            if ui.selectable_label(selected, &choice.label).clicked() {
+                                app.request_theme_selection(choice.id, context);
+                                ui.close();
+                            }
+                        }
+                        let saved = choices
+                            .iter()
+                            .filter(|choice| !choice.built_in)
+                            .collect::<Vec<_>>();
+                        if !saved.is_empty() {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("SAVED THEMES")
+                                    .monospace()
+                                    .size(9.0)
+                                    .color(tokens.muted.egui()),
+                            );
+                            for choice in saved {
+                                let selected = app.preferences.themes.selected() == choice.id;
+                                if ui.selectable_label(selected, &choice.label).clicked() {
+                                    app.request_theme_selection(choice.id, context);
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
+                if ui
+                    .add_sized([112.0, 30.0], egui::Button::new("+ New theme"))
+                    .clicked()
+                {
+                    if app.preferences.themes.begin_new_theme() {
+                        app.preview_theme_changes(context);
+                        app.theme_status = "New theme — enter a name and save".into();
+                    } else {
+                        app.theme_status = "Save or discard the current changes first".into();
+                    }
+                }
             });
             ui.horizontal(|ui| {
-                ui.add_sized(
-                    [102.0, 18.0],
-                    egui::Label::new(
-                        RichText::new("Translucency")
-                            .size(11.0)
-                            .color(tokens.muted.egui()),
-                    )
-                    .halign(egui::Align::LEFT),
-                );
-                let slider_width = (ui.available_width() - 42.0).max(120.0);
-                if ui
-                    .add_sized(
-                        [slider_width, 18.0],
-                        egui::Slider::new(&mut app.preferences.glass_translucency, 0..=90)
-                            .show_value(false),
-                    )
-                    .on_hover_text("Higher values reveal more of the desktop through the native tint")
-                    .changed()
-                {
-                    let _ = app.preferences.save();
-                }
+                let selected = app.preferences.themes.selected();
                 ui.label(
-                    RichText::new(format!("{}%", app.preferences.glass_translucency))
-                        .monospace()
-                        .size(10.0),
+                    RichText::new(match selected {
+                        ThemeId::BuiltIn(_) => "Built-in · immutable",
+                        ThemeId::Saved(_) => "Saved theme · editable",
+                    })
+                    .monospace()
+                    .size(9.5)
+                    .color(tokens.muted.egui()),
                 );
+                if app.preferences.themes.is_creating() {
+                    ui.label(
+                        RichText::new("CREATING")
+                            .monospace()
+                            .size(9.5)
+                            .color(tokens.accent.egui()),
+                    );
+                } else if app.preferences.themes.is_dirty() {
+                    ui.label(
+                        RichText::new("UNSAVED CHANGES")
+                            .monospace()
+                            .size(9.5)
+                            .color(tokens.danger.egui()),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("SAVED")
+                            .monospace()
+                            .size(9.5)
+                            .color(tokens.accent.egui()),
+                    );
+                }
             });
-            if setting_toggle(
-                ui,
-                &mut app.preferences.solid_when_inactive,
-                "Solid when inactive",
-                tokens,
-            ) {
-                let _ = app.preferences.save();
-            }
-            ui.label(
-                RichText::new(
-                    "Blur and tint remain active when focus moves elsewhere. Solid when inactive is an optional readability fallback.",
-                )
-                .size(10.0)
-                .color(tokens.muted.egui()),
-            );
         });
 }
 
-fn theme_card(
-    ui: &mut egui::Ui,
+fn theme_editor(
     app: &mut ConvertalotApp,
+    ui: &mut egui::Ui,
     context: &egui::Context,
-    mode: ThemeMode,
-    label: &str,
-    preview: ThemeTokens,
-    width: f32,
+    tokens: &ThemeTokens,
 ) {
-    let selected = app.preferences.active_theme == mode;
-    let tokens = app.preferences.tokens();
-    let card_fill = tokens.panel.egui();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 66.0), egui::Sense::click());
-    let border = if selected {
-        Stroke::new(2.0, tokens.accent.egui())
-    } else if response.hovered() || response.has_focus() {
-        Stroke::new(1.0, tokens.muted.egui())
-    } else {
-        Stroke::new(1.0, tokens.border.egui())
-    };
-    ui.painter()
-        .rect(rect, 9.0, card_fill, border, egui::StrokeKind::Inside);
-    let preview_rect = egui::Rect::from_min_max(
-        rect.min + egui::vec2(10.0, 7.0),
-        egui::pos2(rect.right() - 10.0, rect.top() + 45.0),
-    );
-    ui.painter()
-        .rect_filled(preview_rect, 4.0, preview.background.egui());
-    ui.painter().rect_filled(
-        egui::Rect::from_min_size(preview_rect.min, egui::vec2(preview_rect.width(), 11.0)),
-        4.0,
-        preview.title.egui(),
-    );
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(
-            preview_rect.min + egui::vec2(7.0, 16.0),
-            egui::pos2(preview_rect.right() - 35.0, preview_rect.bottom() - 5.0),
-        ),
-        3.0,
-        preview.panel.egui(),
-    );
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(preview_rect.right() - 29.0, preview_rect.top() + 16.0),
-            preview_rect.max - egui::vec2(7.0, 5.0),
-        ),
-        3.0,
-        preview.accent.egui(),
-    );
-    let radio_center = egui::pos2(rect.left() + 16.0, rect.bottom() - 11.0);
-    ui.painter()
-        .circle_stroke(radio_center, 6.0, Stroke::new(1.0, tokens.border.egui()));
-    if selected {
-        ui.painter()
-            .circle_filled(radio_center, 5.0, tokens.accent.egui());
-    }
-    ui.painter().text(
-        egui::pos2(rect.left() + 29.0, rect.bottom() - 11.0),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::new(12.0, egui::FontFamily::Name("Arial Bold".into())),
-        tokens.text.egui(),
-    );
-    let keyboard_activated = response.has_focus()
-        && ui.input(|input| {
-            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+    let editing_saved = app.preferences.themes.editing_saved().is_some();
+    let name_editable = app.preferences.themes.is_creating()
+        || (!editing_saved && app.preferences.themes.is_dirty());
+    egui::Frame::new()
+        .fill(tokens.panel.egui())
+        .stroke(Stroke::new(1.0, tokens.border.egui()))
+        .corner_radius(9.0)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            let mut name = app.preferences.themes.draft_name().to_owned();
+            ui.horizontal(|ui| {
+                ui.add_sized([92.0, 27.0], egui::Label::new("Theme name"));
+                let hint = if editing_saved {
+                    "Use Rename to change this saved name"
+                } else if name_editable {
+                    "e.g. Warm Glass"
+                } else {
+                    "Edit a value to name a custom copy"
+                };
+                if ui
+                    .add_sized(
+                        [(ui.available_width() - 4.0).max(220.0), 27.0],
+                        centered_text_edit(&mut name)
+                            .hint_text(hint)
+                            .interactive(name_editable),
+                    )
+                    .changed()
+                {
+                    app.preferences.themes.set_draft_name(name);
+                }
+            });
+            ui.add_space(5.0);
+
+            let is_glass = app
+                .preferences
+                .themes
+                .resolved_appearance()
+                .material
+                .is_glass();
+            ui.horizontal(|ui| {
+                ui.add_sized([92.0, 27.0], egui::Label::new("Material"));
+                if ui.selectable_label(!is_glass, "Solid").clicked() {
+                    app.preferences.themes.set_solid();
+                    app.preview_theme_changes(context);
+                }
+                if ui.selectable_label(is_glass, "Glass").clicked() {
+                    app.preferences.themes.set_glass();
+                    app.preview_theme_changes(context);
+                }
+                ui.label(
+                    RichText::new(if is_glass {
+                        "Background color supplies the native Glass tint"
+                    } else {
+                        "Native Glass is disabled"
+                    })
+                    .size(10.0)
+                    .color(tokens.muted.egui()),
+                );
+            });
+
+            if is_glass {
+                glass_editor(app, ui, context, tokens);
+            }
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+            section(ui, "Color tokens");
+            muted(ui, "Use #RRGGBB for opaque or #RRGGBBAA for alpha.", tokens);
+            token_editor(app, ui, context);
+            ui.add_space(6.0);
+            theme_actions(app, ui, context, tokens, editing_saved);
         });
-    if response.clicked() || keyboard_activated {
-        app.select_theme(mode, context);
+}
+
+fn glass_editor(
+    app: &mut ConvertalotApp,
+    ui: &mut egui::Ui,
+    context: &egui::Context,
+    tokens: &ThemeTokens,
+) {
+    let WindowMaterial::Glass {
+        mut blur,
+        mut translucency,
+        mut solid_when_inactive,
+    } = app
+        .preferences
+        .themes
+        .resolved_appearance()
+        .material
+        .clone()
+    else {
+        return;
+    };
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_sized([92.0, 20.0], egui::Label::new("Blur"));
+        changed |= ui
+            .add(egui::Slider::new(&mut blur, 0..=64).suffix(" px"))
+            .changed();
+        ui.add_space(18.0);
+        ui.add_sized([92.0, 20.0], egui::Label::new("Translucency"));
+        changed |= ui
+            .add(egui::Slider::new(&mut translucency, 0..=90).suffix("%"))
+            .changed();
+    });
+    changed |= setting_toggle(ui, &mut solid_when_inactive, "Solid when inactive", tokens);
+    if changed {
+        app.preferences
+            .themes
+            .set_glass_values(blur, translucency, solid_when_inactive);
+        app.preview_theme_changes(context);
+    }
+}
+
+fn token_editor(app: &mut ConvertalotApp, ui: &mut egui::Ui, context: &egui::Context) {
+    let mut custom = app.preferences.themes.resolved_appearance().tokens.clone();
+    let mut changed = false;
+    ui.columns(2, |columns| {
+        token_group_heading(&mut columns[0], "SURFACES", &custom);
+        changed |= token_row(
+            &mut columns[0],
+            0,
+            "canvas",
+            &mut custom.canvas,
+            &mut app.theme_hex[0],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            1,
+            "window / tint",
+            &mut custom.background,
+            &mut app.theme_hex[1],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            2,
+            "panel",
+            &mut custom.panel,
+            &mut app.theme_hex[2],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            3,
+            "control",
+            &mut custom.control,
+            &mut app.theme_hex[3],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            4,
+            "field",
+            &mut custom.field,
+            &mut app.theme_hex[4],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            5,
+            "alternate row",
+            &mut custom.row_alt,
+            &mut app.theme_hex[5],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            6,
+            "border",
+            &mut custom.border,
+            &mut app.theme_hex[6],
+        );
+        token_group_heading(&mut columns[0], "CONTENT", &custom);
+        changed |= token_row(
+            &mut columns[0],
+            7,
+            "text",
+            &mut custom.text,
+            &mut app.theme_hex[7],
+        );
+        changed |= token_row(
+            &mut columns[0],
+            8,
+            "muted",
+            &mut custom.muted,
+            &mut app.theme_hex[8],
+        );
+
+        token_group_heading(&mut columns[1], "ACTIONS", &custom);
+        changed |= token_row(
+            &mut columns[1],
+            9,
+            "accent",
+            &mut custom.accent,
+            &mut app.theme_hex[9],
+        );
+        changed |= token_row(
+            &mut columns[1],
+            10,
+            "on accent",
+            &mut custom.on_accent,
+            &mut app.theme_hex[10],
+        );
+        changed |= token_row(
+            &mut columns[1],
+            11,
+            "danger",
+            &mut custom.danger,
+            &mut app.theme_hex[11],
+        );
+        token_group_heading(&mut columns[1], "TITLE BAR", &custom);
+        changed |= token_row(
+            &mut columns[1],
+            12,
+            "title",
+            &mut custom.title,
+            &mut app.theme_hex[12],
+        );
+        changed |= token_row(
+            &mut columns[1],
+            13,
+            "title text",
+            &mut custom.title_text,
+            &mut app.theme_hex[13],
+        );
+        changed |= token_row(
+            &mut columns[1],
+            14,
+            "title muted",
+            &mut custom.title_muted,
+            &mut app.theme_hex[14],
+        );
+        changed |= token_row(
+            &mut columns[1],
+            15,
+            "title rule",
+            &mut custom.title_rule,
+            &mut app.theme_hex[15],
+        );
+        changed |= token_row(
+            &mut columns[1],
+            16,
+            "title control",
+            &mut custom.title_control,
+            &mut app.theme_hex[16],
+        );
+    });
+    if changed {
+        app.preferences.themes.set_draft_tokens(custom);
+        app.preview_theme_changes(context);
+        app.theme_status = "Unsaved changes".into();
+    }
+}
+
+fn theme_actions(
+    app: &mut ConvertalotApp,
+    ui: &mut egui::Ui,
+    context: &egui::Context,
+    tokens: &ThemeTokens,
+    editing_saved: bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        let save_label = if editing_saved {
+            "Save changes"
+        } else {
+            "Save as new theme"
+        };
+        if ui
+            .add_enabled(
+                app.preferences.themes.is_dirty(),
+                egui::Button::new(
+                    RichText::new(save_label)
+                        .strong()
+                        .color(tokens.on_accent.egui()),
+                )
+                .fill(tokens.accent.egui()),
+            )
+            .clicked()
+        {
+            match app.preferences.themes.save_draft() {
+                Ok(_) => {
+                    app.preview_theme_changes(context);
+                    app.theme_status = app.save_theme_preferences("Theme saved".into());
+                }
+                Err(error) => app.theme_status = error,
+            }
+        }
+        if ui
+            .add_enabled(
+                app.preferences.themes.is_dirty(),
+                egui::Button::new("Discard changes"),
+            )
+            .clicked()
+        {
+            app.preferences.themes.discard_draft();
+            app.preview_theme_changes(context);
+            app.theme_status = "Changes discarded".into();
+        }
+        if editing_saved {
+            if ui
+                .add_enabled(
+                    !app.preferences.themes.is_dirty(),
+                    egui::Button::new("Rename"),
+                )
+                .clicked()
+            {
+                app.rename_theme = Some(app.preferences.themes.draft_name().to_owned());
+            }
+            if ui
+                .add_enabled(
+                    !app.preferences.themes.is_dirty(),
+                    egui::Button::new(RichText::new("Delete").color(tokens.danger.egui())),
+                )
+                .clicked()
+            {
+                app.confirm_delete_theme = true;
+            }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(&app.theme_status)
+                    .monospace()
+                    .size(9.5)
+                    .color(
+                        if app.theme_status.starts_with("Could not")
+                            || app.theme_status.starts_with("Enter")
+                        {
+                            tokens.danger.egui()
+                        } else {
+                            tokens.muted.egui()
+                        },
+                    ),
+            );
+        });
+    });
+}
+
+pub(crate) fn theme_dialogs(app: &mut ConvertalotApp, context: &egui::Context) {
+    if app.preferences.themes.pending_selection().is_some() {
+        egui::Window::new("Unsaved theme changes")
+            .id(egui::Id::new("dirty-theme-navigation"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                ui.label("Save your changes before switching themes?");
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        app.resolve_dirty_navigation(DirtyDecision::Save, context);
+                    }
+                    if ui.button("Discard").clicked() {
+                        app.resolve_dirty_navigation(DirtyDecision::Discard, context);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        app.resolve_dirty_navigation(DirtyDecision::Cancel, context);
+                    }
+                });
+            });
+    }
+
+    if let Some(mut name) = app.rename_theme.take() {
+        let mut keep_open = true;
+        egui::Window::new("Rename theme")
+            .id(egui::Id::new("rename-theme"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                ui.add_sized([300.0, 28.0], centered_text_edit(&mut name));
+                ui.horizontal(|ui| {
+                    if ui.button("Rename").clicked() {
+                        match app.preferences.themes.rename_selected(&name) {
+                            Ok(_) => {
+                                app.theme_status =
+                                    app.save_theme_preferences("Theme renamed".into());
+                                keep_open = false;
+                            }
+                            Err(error) => app.theme_status = error,
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep_open = false;
+                    }
+                });
+            });
+        if keep_open {
+            app.rename_theme = Some(name);
+        }
+    }
+
+    if app.confirm_delete_theme {
+        egui::Window::new("Delete theme?")
+            .id(egui::Id::new("delete-theme"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(context, |ui| {
+                ui.label("This removes the selected saved theme.");
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        match app.preferences.themes.delete_selected() {
+                            Ok(_) => {
+                                app.preview_theme_changes(context);
+                                app.theme_status =
+                                    app.save_theme_preferences("Theme deleted; using Dark".into());
+                            }
+                            Err(error) => app.theme_status = error,
+                        }
+                        app.confirm_delete_theme = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        app.confirm_delete_theme = false;
+                    }
+                });
+            });
     }
 }
 
@@ -1112,7 +1273,7 @@ fn token_row(
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 7.0;
-        let (label_rect, _) = ui.allocate_exact_size(egui::vec2(187.0, 19.0), egui::Sense::hover());
+        let (label_rect, _) = ui.allocate_exact_size(egui::vec2(157.0, 19.0), egui::Sense::hover());
         ui.painter().text(
             label_rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -1121,16 +1282,15 @@ fn token_row(
             ui.visuals().text_color(),
         );
         if ui.color_edit_button_srgba(&mut picked).changed() {
-            *color = HexColor([picked.r(), picked.g(), picked.b()]);
+            *color = HexColor::from(picked);
             *text = color.to_string();
             changed = true;
         }
         let response = ui.add_sized(
             [94.0, 19.0],
-            egui::TextEdit::singleline(text)
+            centered_monospace_text_edit(text)
                 .id_salt(("theme-token", index))
-                .font(egui::TextStyle::Monospace)
-                .vertical_align(egui::Align::Center),
+                .font(egui::TextStyle::Monospace),
         );
         if response.changed()
             && let Ok(parsed) = text.parse()
@@ -1140,7 +1300,7 @@ fn token_row(
         }
         if text.parse::<HexColor>().is_err() {
             let rect = response.rect;
-            response.on_hover_text("Enter a color as #RRGGBB");
+            response.on_hover_text("Enter #RRGGBB or #RRGGBBAA");
             ui.painter().text(
                 rect.right_center() - egui::vec2(7.0, 0.0),
                 egui::Align2::CENTER_CENTER,
@@ -1153,27 +1313,33 @@ fn token_row(
     changed
 }
 
-fn token_values(tokens: &ThemeTokens) -> Vec<String> {
-    [
-        tokens.canvas,
-        tokens.background,
-        tokens.panel,
-        tokens.control,
-        tokens.field,
-        tokens.row_alt,
-        tokens.border,
-        tokens.text,
-        tokens.muted,
-        tokens.accent,
-        tokens.on_accent,
-        tokens.danger,
-        tokens.title,
-        tokens.title_text,
-        tokens.title_muted,
-        tokens.title_rule,
-        tokens.title_control,
-    ]
-    .into_iter()
-    .map(|c| c.to_string())
-    .collect()
+fn centered_text_edit<'a>(text: &'a mut dyn egui::TextBuffer) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .vertical_align(egui::Align::Center)
+        // Arial's visible glyphs sit slightly above the center of its line box.
+        .margin(egui::Margin {
+            left: 4,
+            right: 4,
+            top: 3,
+            bottom: 1,
+        })
+}
+
+fn centered_monospace_text_edit<'a>(text: &'a mut dyn egui::TextBuffer) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .vertical_align(egui::Align::Center)
+        // Consolas needs a larger optical correction than Arial because its visible glyphs sit
+        // higher within the line box.
+        .margin(egui::Margin {
+            left: 4,
+            right: 4,
+            top: 5,
+            bottom: -1,
+        })
+}
+
+fn centered_tall_monospace_text_edit<'a>(text: &'a mut dyn egui::TextBuffer) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .vertical_align(egui::Align::Center)
+        .margin(egui::Margin::symmetric(4, 2))
 }

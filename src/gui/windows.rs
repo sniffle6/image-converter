@@ -4,12 +4,12 @@ use eframe::egui::{self, Align, Layout, RichText, Sense, Stroke};
 
 use crate::{
     app::{ConvertalotApp, Screen},
-    theme::ThemeMode,
+    theme_catalog::{BuiltInTheme, ThemeId},
 };
 
 pub(crate) fn title_bar(app: &mut ConvertalotApp, root: &mut egui::Ui) {
     let context = root.ctx().clone();
-    let tokens = app.preferences.tokens();
+    let tokens = app.tokens();
     let title_fill = app.backdrop_fill(tokens.title);
     egui::Panel::top("custom-title-bar")
         .exact_size(52.0)
@@ -55,13 +55,16 @@ pub(crate) fn title_bar(app: &mut ConvertalotApp, root: &mut egui::Ui) {
                     },
                 ));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if title_button(ui, "×", &tokens).clicked() {
+                    if caption_button(ui, CaptionAction::Close, &tokens).clicked() {
                         context.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                    if title_button(ui, "▢", &tokens).clicked() {
+                    let maximized =
+                        context.input(|input| input.viewport().maximized.unwrap_or(false));
+                    if caption_button(ui, CaptionAction::Maximize { maximized }, &tokens).clicked()
+                    {
                         toggle_maximized(&context);
                     }
-                    if title_button(ui, "–", &tokens).clicked() {
+                    if caption_button(ui, CaptionAction::Minimize, &tokens).clicked() {
                         context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
                     ui.add_space(5.0);
@@ -86,33 +89,51 @@ pub(crate) fn title_bar(app: &mut ConvertalotApp, root: &mut egui::Ui) {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             if theme_pill(
                                 ui,
-                                "●",
-                                app.preferences.active_theme == ThemeMode::Glass,
+                                ThemeIcon::Glass,
+                                "Glass",
+                                app.preferences
+                                    .themes
+                                    .resolved_appearance()
+                                    .material
+                                    .is_glass(),
                                 &tokens,
                             )
                             .clicked()
                             {
-                                app.select_theme(ThemeMode::Glass, &context);
+                                app.request_theme_selection(
+                                    ThemeId::BuiltIn(BuiltInTheme::Glass),
+                                    &context,
+                                );
                             }
                             if theme_pill(
                                 ui,
-                                "◐",
-                                app.preferences.active_theme == ThemeMode::Dark,
+                                ThemeIcon::Dark,
+                                "Dark",
+                                app.preferences.themes.selected()
+                                    == ThemeId::BuiltIn(BuiltInTheme::Dark),
                                 &tokens,
                             )
                             .clicked()
                             {
-                                app.select_theme(ThemeMode::Dark, &context);
+                                app.request_theme_selection(
+                                    ThemeId::BuiltIn(BuiltInTheme::Dark),
+                                    &context,
+                                );
                             }
                             if theme_pill(
                                 ui,
-                                "☀",
-                                app.preferences.active_theme == ThemeMode::Light,
+                                ThemeIcon::Light,
+                                "Light",
+                                app.preferences.themes.selected()
+                                    == ThemeId::BuiltIn(BuiltInTheme::Light),
                                 &tokens,
                             )
                             .clicked()
                             {
-                                app.select_theme(ThemeMode::Light, &context);
+                                app.request_theme_selection(
+                                    ThemeId::BuiltIn(BuiltInTheme::Light),
+                                    &context,
+                                );
                             }
                         });
                 });
@@ -136,27 +157,211 @@ fn title_button(
     )
 }
 
+#[derive(Clone, Copy)]
+enum CaptionAction {
+    Minimize,
+    Maximize { maximized: bool },
+    Close,
+}
+
+fn caption_button(
+    ui: &mut egui::Ui,
+    action: CaptionAction,
+    tokens: &crate::theme::ThemeTokens,
+) -> egui::Response {
+    let label = match action {
+        CaptionAction::Minimize => "Minimize",
+        CaptionAction::Maximize { maximized: true } => "Restore",
+        CaptionAction::Maximize { maximized: false } => "Maximize",
+        CaptionAction::Close => "Close",
+    };
+    let response = ui.add(
+        egui::Button::new("")
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(Stroke::NONE)
+            .corner_radius(5.0)
+            .min_size(egui::vec2(34.0, 28.0)),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+
+    let hovered = response.hovered() || response.has_focus();
+    if hovered {
+        let fill = if matches!(action, CaptionAction::Close) {
+            tokens.danger.egui()
+        } else {
+            tokens.title_control.egui()
+        };
+        ui.painter().rect_filled(response.rect, 5.0, fill);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect.shrink(1.0),
+            4.0,
+            Stroke::new(1.0, tokens.accent.egui()),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let color = if hovered && matches!(action, CaptionAction::Close) {
+        tokens.on_accent.egui()
+    } else if hovered {
+        tokens.title_text.egui()
+    } else {
+        tokens.title_muted.egui()
+    };
+    paint_caption_icon(ui.painter(), response.rect.center(), action, color);
+    response.on_hover_text(label)
+}
+
+fn paint_caption_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    action: CaptionAction,
+    color: egui::Color32,
+) {
+    let stroke = Stroke::new(1.25, color);
+    match action {
+        CaptionAction::Minimize => {
+            painter.line_segment(
+                [
+                    center + egui::vec2(-5.0, 3.0),
+                    center + egui::vec2(5.0, 3.0),
+                ],
+                stroke,
+            );
+        }
+        CaptionAction::Maximize { maximized: false } => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center, egui::vec2(9.0, 8.0)),
+                0.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        CaptionAction::Maximize { maximized: true } => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center + egui::vec2(-1.7, -1.7), egui::vec2(7.5, 6.5)),
+                0.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_center_size(center + egui::vec2(1.7, 1.7), egui::vec2(7.5, 6.5)),
+                0.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        CaptionAction::Close => {
+            painter.line_segment(
+                [
+                    center + egui::vec2(-4.0, -4.0),
+                    center + egui::vec2(4.0, 4.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center + egui::vec2(4.0, -4.0),
+                    center + egui::vec2(-4.0, 4.0),
+                ],
+                stroke,
+            );
+        }
+    }
+}
+
 fn theme_pill(
     ui: &mut egui::Ui,
-    text: &str,
+    icon: ThemeIcon,
+    label: &'static str,
     selected: bool,
     tokens: &crate::theme::ThemeTokens,
 ) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new(text).strong().size(11.0).color(if selected {
-            tokens.on_accent.egui()
-        } else {
-            tokens.title_muted.egui()
-        }))
-        .fill(if selected {
-            tokens.accent.egui()
-        } else {
-            egui::Color32::TRANSPARENT
-        })
-        .stroke(Stroke::NONE)
-        .corner_radius(20.0)
-        .min_size(egui::vec2(28.0, 20.0)),
-    )
+    let response = ui.add(
+        egui::Button::new("")
+            .selected(selected)
+            .fill(if selected {
+                tokens.accent.egui()
+            } else {
+                egui::Color32::TRANSPARENT
+            })
+            .stroke(Stroke::NONE)
+            .corner_radius(20.0)
+            .min_size(egui::vec2(28.0, 20.0)),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
+    let color = if selected {
+        tokens.on_accent.egui()
+    } else if response.hovered() || response.has_focus() {
+        tokens.accent.egui()
+    } else {
+        tokens.title_muted.egui()
+    };
+    let fill = if selected {
+        tokens.accent.egui()
+    } else {
+        tokens.title_control.egui()
+    };
+    paint_theme_icon(ui.painter(), response.rect.center(), icon, color, fill);
+    response.on_hover_text(label)
+}
+
+#[derive(Clone, Copy)]
+enum ThemeIcon {
+    Light,
+    Dark,
+    Glass,
+}
+
+fn paint_theme_icon(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    icon: ThemeIcon,
+    color: egui::Color32,
+    fill: egui::Color32,
+) {
+    let stroke = Stroke::new(1.2, color);
+    match icon {
+        ThemeIcon::Light => {
+            painter.circle_stroke(center, 2.8, stroke);
+            for (start, end) in [
+                ((0.0, -4.5), (0.0, -6.0)),
+                ((0.0, 4.5), (0.0, 6.0)),
+                ((-4.5, 0.0), (-6.0, 0.0)),
+                ((4.5, 0.0), (6.0, 0.0)),
+                ((-3.2, -3.2), (-4.3, -4.3)),
+                ((3.2, 3.2), (4.3, 4.3)),
+                ((3.2, -3.2), (4.3, -4.3)),
+                ((-3.2, 3.2), (-4.3, 4.3)),
+            ] {
+                painter.line_segment(
+                    [
+                        center + egui::vec2(start.0, start.1),
+                        center + egui::vec2(end.0, end.1),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        ThemeIcon::Dark => {
+            painter.circle_filled(center, 5.2, color);
+            painter.circle_filled(center + egui::vec2(2.5, -1.7), 4.8, fill);
+        }
+        ThemeIcon::Glass => {
+            let back =
+                egui::Rect::from_center_size(center + egui::vec2(-1.8, -1.3), egui::vec2(8.0, 7.0));
+            let front =
+                egui::Rect::from_center_size(center + egui::vec2(1.8, 1.3), egui::vec2(8.0, 7.0));
+            painter.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Inside);
+            painter.rect_filled(front, 1.5, fill);
+            painter.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Inside);
+        }
+    }
 }
 
 fn toggle_maximized(context: &egui::Context) {
