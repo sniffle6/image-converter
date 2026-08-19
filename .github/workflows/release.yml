@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          # cargo build/test run third-party build scripts; never leave the
+          # contents:write token readable in .git/config while they execute.
+          persist-credentials: false
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          $expected = $env:RELEASE_TAG.TrimStart('v')
+          $manifest = Get-Content Cargo.toml -Raw
+          if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw 'Unable to find a package version in Cargo.toml.'
+          }
+          $actual = $Matches[1]
+          if ($actual -ne $expected) {
+            throw "Tag $env:RELEASE_TAG does not match Cargo.toml version $actual. Bump the version (and Cargo.lock) before tagging."
+          }
+
+      - name: Update Rust toolchain
+        run: |
+          # Only the last native command's exit code fails a pwsh step by default.
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup update --no-self-update stable
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binaries
+        run: cargo build --release --locked
+
+      - name: Package release archive
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          & target/release/image-converter.exe --version
+          $archive = "convertalot-$env:RELEASE_TAG-x86_64-pc-windows-msvc.zip"
+          $staging = Join-Path $env:RUNNER_TEMP 'convertalot-staging'
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item target/release/image-converter.exe, target/release/image-converter-gui.exe, README.md -Destination $staging
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *$archive" | Set-Content SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $archive = "convertalot-$env:RELEASE_TAG-x86_64-pc-windows-msvc.zip"
+          $ghArgs = @(
+            'release', 'create', $env:RELEASE_TAG,
+            $archive, 'SHA256SUMS.txt',
+            '--title', "Convertalot $env:RELEASE_TAG",
+            '--generate-notes',
+            '--verify-tag'
+          )
+          if ($env:RELEASE_TAG -match '-') { $ghArgs += '--prerelease' }
+          gh @ghArgs

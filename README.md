@@ -2,6 +2,30 @@
 
 Convertalot is a fast Windows image converter with a native drag-and-drop egui workbench and a scriptable CLI. Both entry points use the same two-stage, parallel Rust conversion engine: inputs are scanned and output names are reserved first, then image jobs run across the available CPU cores.
 
+## Install
+
+Install or update the latest release from PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/sniffle6/image-converter/main/install.ps1 | iex
+```
+
+This downloads the newest [GitHub release](https://github.com/sniffle6/image-converter/releases), verifies its SHA-256 checksum, installs both executables to `%LOCALAPPDATA%\Programs\Convertalot`, adds that folder to your user PATH, and creates a Start Menu shortcut for the GUI.
+
+Options are controlled with environment variables (the piped form cannot take parameters):
+
+```powershell
+# Pin a specific version.
+$env:CONVERTALOT_VERSION = 'v0.1.0'; irm https://raw.githubusercontent.com/sniffle6/image-converter/main/install.ps1 | iex
+
+# Uninstall.
+$env:CONVERTALOT_UNINSTALL = '1'; irm https://raw.githubusercontent.com/sniffle6/image-converter/main/install.ps1 | iex
+```
+
+`CONVERTALOT_INSTALL_DIR` overrides the install folder, and `CONVERTALOT_NO_PATH=1` / `CONVERTALOT_NO_SHORTCUT=1` skip the PATH update and shortcut. Alternatively, download `install.ps1` and run it directly with `-Version`, `-InstallDir`, `-NoPath`, `-NoShortcut`, or `-Uninstall`.
+
+Releases are cut automatically when a `vX.Y.Z` tag is pushed — see [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Desktop app
 
 The GUI opens at 900 × 620 and defaults to JPEG quality 90, fit inside 1920 × 1080. Drop files or recursive folders onto the window, review the expanded queue and destination names, then convert. Each row reports queued, converting, done, failed, or cancelled state. Cancelling stops work that has not started; completed files remain saved.
