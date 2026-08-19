@@ -43,6 +43,7 @@ pub(crate) enum Phase {
     Running,
     Complete,
     Failed(String),
+    BatchFailed(String),
 }
 
 #[derive(Clone, Debug)]
@@ -427,21 +428,33 @@ impl ConvertalotApp {
             }
         }
         if let Some(receiver) = self.worker.take() {
-            let mut finished = false;
-            while let Ok(message) = receiver.try_recv() {
-                match message {
-                    WorkerMessage::Event(event) => self.rows.apply_event(event),
-                    WorkerMessage::Finished(report) => {
+            let mut keep_receiver = true;
+            loop {
+                match receiver.try_recv() {
+                    Ok(WorkerMessage::Event(event)) => self.rows.apply_event(event),
+                    Ok(WorkerMessage::Finished(report)) => {
                         self.rows.apply_report(&report);
                         self.report = Some(report);
                         self.phase = Phase::Complete;
                         self.cancellation = None;
                         self.run_started = None;
-                        finished = true;
+                        keep_receiver = false;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.phase = Phase::BatchFailed(
+                            "conversion worker stopped unexpectedly; finished files were preserved"
+                                .to_owned(),
+                        );
+                        self.cancellation = None;
+                        self.run_started = None;
+                        keep_receiver = false;
+                        break;
                     }
                 }
             }
-            if !finished {
+            if keep_receiver {
                 self.worker = Some(receiver);
             }
         }

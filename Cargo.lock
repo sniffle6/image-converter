@@ -22,7 +22,6 @@ name = "aero-glass"
 version = "0.1.0"
 dependencies = [
  "raw-window-handle",
- "thiserror 2.0.20",
  "windows",
  "windows-core",
  "windows-numerics",
@@ -1139,7 +1138,6 @@ dependencies = [
  "clap",
  "eframe",
  "image",
- "raw-window-handle",
  "rayon",
  "rfd",
  "serde",

@@ -12,7 +12,9 @@ pub(crate) fn show(app: &mut ConvertalotApp, root: &mut egui::Ui, context: &egui
             Phase::Empty => empty(app, context, ui),
             Phase::Planning => planning(ui, &tokens),
             Phase::Failed(error) => failed(app, context, ui, error.clone()),
-            Phase::Ready | Phase::Running | Phase::Complete => queue(app, context, ui),
+            Phase::Ready | Phase::Running | Phase::Complete | Phase::BatchFailed(_) => {
+                queue(app, context, ui)
+            }
         });
 }
 
@@ -282,7 +284,7 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
         );
         return;
     }
-    if app.phase == Phase::Complete {
+    if matches!(app.phase, Phase::Complete | Phase::BatchFailed(_)) {
         let completed = app.rows.completed();
         let total = app.rows.rows.len();
         ui.add_space(8.0);
@@ -318,7 +320,11 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
     match app.phase {
         Phase::Ready => unreachable!("ready queue returns after drawing its footer"),
         Phase::Running => unreachable!("running queue returns after drawing its footer"),
-        Phase::Complete => {
+        Phase::Complete | Phase::BatchFailed(_) => {
+            if let Phase::BatchFailed(error) = &app.phase {
+                ui.label(RichText::new(error).size(11.5).color(tokens.danger.egui()));
+                ui.add_space(4.0);
+            }
             ui.horizontal(|ui| {
                 if ui
                     .add(egui::Button::new("RUN AGAIN").fill(tokens.accent.egui()))
@@ -346,7 +352,7 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
                 );
             });
         }
-        _ => {}
+        Phase::Empty | Phase::Planning | Phase::Failed(_) => {}
     }
 }
 

@@ -1,5 +1,3 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 #[cfg(not(windows))]
 fn main() {
     eprintln!("The Aero Glass probe runs only on Windows.");

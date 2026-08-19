@@ -310,11 +310,12 @@ impl Converter {
             .items
             .par_iter()
             .map(|item| {
-                if cancelled.load(Ordering::Relaxed) {
-                    return cancelled_result(item);
-                }
-                on_event(ConversionEvent::ItemStarted { id: item.id });
-                let result = convert_one(item, request);
+                let result = if cancelled.load(Ordering::Relaxed) {
+                    cancelled_result(item)
+                } else {
+                    on_event(ConversionEvent::ItemStarted { id: item.id });
+                    convert_one(item, request)
+                };
                 on_event(ConversionEvent::ItemFinished(result.clone()));
                 result
             })
@@ -421,16 +422,18 @@ fn plan_jobs(inputs: &[(PathBuf, u64)], request: &ConversionRequest) -> Vec<Plan
                 .unwrap_or("image");
             let extension = request.format.extension();
             let mut output = output_dir.join(format!("{stem}.{extension}"));
-            if output == *input {
+            if collision_key(&output) == collision_key(input) {
                 output = output_dir.join(format!("{stem}-converted.{extension}"));
             }
             let mut number = 2;
-            while reserved.contains(&output) || (!request.overwrite && output.exists()) {
+            while reserved.contains(&collision_key(&output))
+                || (!request.overwrite && output.exists())
+            {
                 let name = request.duplicate_style.name(stem, number);
                 output = output_dir.join(format!("{name}.{extension}"));
                 number += 1;
             }
-            reserved.insert(output.clone());
+            reserved.insert(collision_key(&output));
             PlannedItem {
                 id: ItemId(index),
                 input: input.clone(),
@@ -439,6 +442,30 @@ fn plan_jobs(inputs: &[(PathBuf, u64)], request: &ConversionRequest) -> Vec<Plan
             }
         })
         .collect()
+}
+
+fn collision_key(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let comparable = fs::canonicalize(path).or_else(|_| {
+            let parent = path.parent().ok_or(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path has no parent",
+            ))?;
+            let canonical_parent = fs::canonicalize(parent)?;
+            Ok::<_, std::io::Error>(canonical_parent.join(path.file_name().unwrap_or_default()))
+        });
+        PathBuf::from(
+            comparable
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy()
+                .to_lowercase(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
 }
 
 fn cancelled_result(item: &PlannedItem) -> ConversionResult {
@@ -669,6 +696,40 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_planning_reserves_paths_case_insensitively() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("photo.png");
+        let second = temp.path().join("PHOTO.bmp");
+        sample(&first, 2, 2);
+        sample(&second, 2, 2);
+
+        let output = temp.path().join("out");
+        let plan = plan_for(ConversionRequest {
+            inputs: vec![first, second],
+            output_dir: Some(output.clone()),
+            format: OutputFormat::Jpeg,
+            ..Default::default()
+        });
+        assert_eq!(plan.items[0].output, output.join("photo.jpg"));
+        assert_eq!(plan.items[1].output, output.join("PHOTO-2.jpg"));
+
+        let uppercase_input = temp.path().join("source.JPG");
+        fs::write(&uppercase_input, b"planning only").unwrap();
+        let self_output = plan_for(ConversionRequest {
+            inputs: vec![uppercase_input],
+            output_dir: Some(temp.path().to_path_buf()),
+            format: OutputFormat::Jpeg,
+            overwrite: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            self_output.items[0].output,
+            temp.path().join("source-converted.jpg")
+        );
+    }
+
     #[test]
     fn jpeg_matte_composites_transparent_partial_opaque_and_rgb_pixels() {
         let custom = RgbColor::new(20, 40, 60);
@@ -758,17 +819,24 @@ mod tests {
         let input = temp.path().join("source.png");
         sample(&input, 2, 2);
         let cancelled = AtomicBool::new(true);
+        let events = Mutex::new(Vec::new());
         let report = Converter.run(
             plan_for(ConversionRequest {
                 inputs: vec![input],
                 ..Default::default()
             }),
             &cancelled,
-            |_| {},
+            |event| events.lock().unwrap().push(event),
         );
         assert!(report.cancelled);
         assert_eq!(report.cancelled_count(), 1);
         assert_eq!(report.results.len(), 1);
+        let events = events.into_inner().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[1],
+            ConversionEvent::ItemFinished(ref result) if result.cancelled
+        ));
     }
 
     #[test]

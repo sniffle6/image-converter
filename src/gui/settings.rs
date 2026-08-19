@@ -30,7 +30,7 @@ pub(crate) fn conversion_sidebar(
                 running_conversion_sidebar(app, ui, &tokens);
                 return;
             }
-            ui.add_enabled_ui(true, |ui| {
+            {
                 let mut changed = false;
                 section(ui, "Convert to");
                 changed |= format_selector(ui, &mut app.format, &tokens);
@@ -216,7 +216,7 @@ pub(crate) fn conversion_sidebar(
                     let _ = app.preferences.save();
                     app.settings_changed(context);
                 }
-            });
+            }
         });
 }
 
