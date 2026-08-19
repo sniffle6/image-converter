@@ -17,7 +17,7 @@ use image_converter::{
 
 use crate::{
     settings,
-    theme::{Preferences, ThemeMode},
+    theme_catalog::{DirtyDecision, Preferences, ThemeId, WindowMaterial},
     windows, workbench,
 };
 
@@ -160,9 +160,12 @@ pub(crate) struct ConvertalotApp {
     pub overwrite: bool,
     pub duplicate_style: DuplicateStyle,
     pub output_dir: Option<PathBuf>,
+    pub output_dir_text: String,
     pub jpeg_hex: String,
     pub theme_status: String,
     pub theme_hex: Vec<String>,
+    pub rename_theme: Option<String>,
+    pub confirm_delete_theme: bool,
     pub planning_failures: Vec<String>,
     source_inputs: Vec<PathBuf>,
     plan: Option<ConversionPlan>,
@@ -179,8 +182,11 @@ pub(crate) struct ConvertalotApp {
 impl ConvertalotApp {
     pub fn new(context: &eframe::CreationContext<'_>) -> Self {
         let preferences = Preferences::load();
-        preferences.apply(&context.egui_ctx);
-        let theme_hex = token_strings(&preferences.custom_tokens);
+        crate::theme::apply(
+            &context.egui_ctx,
+            &preferences.themes.resolved_appearance().tokens,
+        );
+        let theme_hex = token_strings(&preferences.themes.resolved_appearance().tokens);
         Self {
             phase: Phase::Empty,
             screen: Screen::Workbench,
@@ -196,8 +202,11 @@ impl ConvertalotApp {
             overwrite: false,
             duplicate_style: DuplicateStyle::Dash,
             output_dir: None,
+            output_dir_text: String::new(),
             theme_status: String::new(),
             theme_hex,
+            rename_theme: None,
+            confirm_delete_theme: false,
             planning_failures: Vec::new(),
             source_inputs: Vec::new(),
             plan: None,
@@ -225,7 +234,11 @@ impl ConvertalotApp {
     }
 
     pub(crate) fn glass_native_active(&self) -> bool {
-        self.preferences.active_theme == ThemeMode::Glass
+        self.preferences
+            .themes
+            .resolved_appearance()
+            .material
+            .is_glass()
             && self
                 .aero_glass
                 .as_ref()
@@ -233,12 +246,22 @@ impl ConvertalotApp {
     }
 
     fn glass_config(&self) -> GlassConfig {
-        let tint = crate::theme::ThemeTokens::glass().background;
+        let appearance = self.preferences.themes.resolved_appearance();
+        let tint = appearance.tokens.background;
+        let [red, green, blue] = tint.rgb();
+        let WindowMaterial::Glass {
+            blur,
+            translucency,
+            solid_when_inactive,
+        } = &appearance.material
+        else {
+            return GlassConfig::default();
+        };
         GlassConfig {
-            tint: aero_glass::RgbColor::new(tint.0[0], tint.0[1], tint.0[2]),
-            translucency: self.preferences.glass_translucency,
-            blur_radius: f32::from(self.preferences.glass_blur),
-            inactive_behavior: if self.preferences.solid_when_inactive {
+            tint: aero_glass::RgbColor::new(red, green, blue),
+            translucency: *translucency,
+            blur_radius: f32::from(*blur),
+            inactive_behavior: if *solid_when_inactive {
                 InactiveBehavior::Solid
             } else {
                 InactiveBehavior::KeepGlass
@@ -266,7 +289,13 @@ impl ConvertalotApp {
             let _ = aero_glass::set_rounded_corners(frame);
             self.rounded_corner_viewport = Some(corner_viewport);
         }
-        if self.preferences.active_theme != ThemeMode::Glass {
+        if !self
+            .preferences
+            .themes
+            .resolved_appearance()
+            .material
+            .is_glass()
+        {
             self.aero_glass = None;
             self.glass_failed = false;
             context.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
@@ -481,21 +510,58 @@ impl ConvertalotApp {
         }
     }
 
-    pub fn select_theme(&mut self, mode: ThemeMode, context: &egui::Context) {
-        self.preferences.active_theme = mode;
-        self.preferences.apply(context);
-        self.theme_status = match self.preferences.save() {
-            Ok(()) => format!(
-                "Using the built-in {} theme",
-                match mode {
-                    ThemeMode::Light => "light",
-                    ThemeMode::Dark => "dark",
-                    ThemeMode::Glass => "glass",
-                    ThemeMode::Custom => "custom",
+    pub(crate) fn tokens(&self) -> crate::theme::ThemeTokens {
+        self.preferences.themes.resolved_appearance().tokens.clone()
+    }
+
+    pub(crate) fn preview_theme_changes(&mut self, context: &egui::Context) {
+        let tokens = self.tokens();
+        self.theme_hex = token_strings(&tokens);
+        crate::theme::apply(context, &tokens);
+    }
+
+    pub(crate) fn request_theme_selection(&mut self, id: ThemeId, context: &egui::Context) {
+        match self.preferences.themes.request_selection(id) {
+            Ok(true) => {
+                self.preview_theme_changes(context);
+                self.theme_status = self.save_theme_preferences(format!(
+                    "Using {}",
+                    self.preferences.themes.selected_label()
+                ));
+            }
+            Ok(false) => {
+                self.theme_status = "Unsaved changes — choose Save, Discard, or Cancel".into();
+            }
+            Err(error) => self.theme_status = error,
+        }
+    }
+
+    pub(crate) fn resolve_dirty_navigation(
+        &mut self,
+        decision: DirtyDecision,
+        context: &egui::Context,
+    ) {
+        match self.preferences.themes.resolve_pending(decision) {
+            Ok(changed) => {
+                if changed {
+                    self.preview_theme_changes(context);
+                    self.theme_status = self.save_theme_preferences(format!(
+                        "Using {}",
+                        self.preferences.themes.selected_label()
+                    ));
+                } else if decision == DirtyDecision::Cancel {
+                    self.theme_status = "Kept unsaved changes".into();
                 }
-            ),
-            Err(e) => format!("Could not save: {e}"),
-        };
+            }
+            Err(error) => self.theme_status = error,
+        }
+    }
+
+    pub(crate) fn save_theme_preferences(&self, success: String) -> String {
+        match self.preferences.save() {
+            Ok(()) => success,
+            Err(error) => format!("Could not save: {error}"),
+        }
     }
 }
 
@@ -550,6 +616,7 @@ impl eframe::App for ConvertalotApp {
             Screen::Appearance => settings::appearance(self, ui, &context),
         }
         windows::resize_handles(&context);
+        settings::theme_dialogs(self, &context);
         if self.is_running() {
             context.request_repaint_after(Duration::from_millis(100));
         }
@@ -560,7 +627,9 @@ impl eframe::App for ConvertalotApp {
             [0.0, 0.0, 0.0, 0.0]
         } else {
             self.preferences
-                .tokens()
+                .themes
+                .resolved_appearance()
+                .tokens
                 .background
                 .egui()
                 .to_normalized_gamma_f32()
