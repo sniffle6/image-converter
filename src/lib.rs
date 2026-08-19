@@ -1,6 +1,7 @@
 mod engine;
 
 pub use engine::{
-    BatchReport, ConversionEvent, ConversionRequest, ConversionResult, Converter, OutputFormat,
-    ResizeMode,
+    BatchReport, ConversionEvent, ConversionPlan, ConversionRequest, ConversionResult, Converter,
+    DuplicateStyle, ItemId, OutputFormat, PlanError, PlannedItem, PlanningFailure, ResizeMode,
+    RgbColor,
 };

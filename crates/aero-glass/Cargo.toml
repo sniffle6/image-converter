@@ -1,0 +1,31 @@
+[package]
+name = "aero-glass"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable supported Windows backdrop blur and tint for native Rust windows"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+raw-window-handle = "0.6.2"
+thiserror = "2.0.17"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Foundation",
+    "Graphics_Effects",
+    "System",
+    "UI",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-numerics = "0.3.1"
+windows-core = "0.62.2"
