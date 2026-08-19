@@ -173,6 +173,7 @@ pub(crate) struct ConvertalotApp {
     run_started: Option<Instant>,
     aero_glass: Option<AeroGlass>,
     glass_failed: bool,
+    rounded_corner_viewport: Option<(u32, u32, bool)>,
 }
 
 impl ConvertalotApp {
@@ -207,6 +208,7 @@ impl ConvertalotApp {
             run_started: None,
             aero_glass: None,
             glass_failed: false,
+            rounded_corner_viewport: None,
         }
     }
 
@@ -245,6 +247,25 @@ impl ConvertalotApp {
     }
 
     fn sync_glass(&mut self, frame: &eframe::Frame, context: &egui::Context, focused: bool) {
+        let corner_viewport = context.input(|input| {
+            let viewport = input.viewport();
+            let size = viewport
+                .outer_rect
+                .map(|rect| rect.size())
+                .unwrap_or_else(|| input.content_rect().size());
+            let scale = viewport.native_pixels_per_point.unwrap_or(1.0);
+            (
+                (size.x * scale).round() as u32,
+                (size.y * scale).round() as u32,
+                viewport.maximized.unwrap_or(false),
+            )
+        });
+        if self.rounded_corner_viewport != Some(corner_viewport) {
+            // A native region explicitly clips the borderless swapchain; DWM preference alone
+            // only rounds the shadow on some borderless-window configurations.
+            let _ = aero_glass::set_rounded_corners(frame);
+            self.rounded_corner_viewport = Some(corner_viewport);
+        }
         if self.preferences.active_theme != ThemeMode::Glass {
             self.aero_glass = None;
             self.glass_failed = false;
