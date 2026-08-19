@@ -4,7 +4,7 @@ use rfd::FileDialog;
 use crate::app::{ConvertalotApp, Phase, RowState};
 
 pub(crate) fn show(app: &mut ConvertalotApp, root: &mut egui::Ui, context: &egui::Context) {
-    let tokens = app.preferences.tokens();
+    let tokens = app.tokens();
     let background_fill = app.backdrop_fill(tokens.background);
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(background_fill).inner_margin(20.0))
@@ -19,7 +19,7 @@ pub(crate) fn show(app: &mut ConvertalotApp, root: &mut egui::Ui, context: &egui
 }
 
 fn empty(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
-    let tokens = app.preferences.tokens();
+    let tokens = app.tokens();
     let panel_fill = app.backdrop_fill(tokens.panel);
     let available = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(
@@ -74,22 +74,7 @@ fn empty(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
                 egui::vec2(360.0, 20.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.label(RichText::new("or").size(13.0).color(tokens.muted.egui()));
-                    if ui
-                        .link(
-                            RichText::new("browse files")
-                                .strong()
-                                .color(tokens.accent.egui()),
-                        )
-                        .clicked()
-                    {
-                        browse_clicked = true;
-                    }
-                    ui.label(
-                        RichText::new("· folders are scanned for you")
-                            .size(13.0)
-                            .color(tokens.muted.egui()),
-                    );
+                    browse_clicked |= browse_prompt(ui, &tokens);
                 },
             );
             ui.label(
@@ -123,6 +108,61 @@ fn empty(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
                 .color(tokens.muted.egui()),
         );
     });
+}
+
+fn browse_prompt(ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens) -> bool {
+    let (row, _) = ui.allocate_exact_size(egui::vec2(360.0, 20.0), egui::Sense::hover());
+    let font = egui::FontId::proportional(13.0);
+    let before = ui
+        .painter()
+        .layout_no_wrap("or".to_owned(), font.clone(), tokens.muted.egui());
+    let link = ui.painter().layout_no_wrap(
+        "browse files".to_owned(),
+        font.clone(),
+        tokens.accent.egui(),
+    );
+    let after = ui.painter().layout_no_wrap(
+        "· folders are scanned for you".to_owned(),
+        font,
+        tokens.muted.egui(),
+    );
+    let gap = 8.0;
+    let total_width = before.size().x + link.size().x + after.size().x + gap * 2.0;
+    let top = row.center().y - before.size().y / 2.0;
+    let before_pos = egui::pos2(row.center().x - total_width / 2.0, top);
+    let link_pos = egui::pos2(before_pos.x + before.size().x + gap, top);
+    let after_pos = egui::pos2(link_pos.x + link.size().x + gap, top);
+    let link_rect = egui::Rect::from_min_size(link_pos, link.size()).expand2(egui::vec2(2.0, 1.0));
+    let response = ui.interact(
+        link_rect,
+        ui.id().with("browse-files-link"),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), "browse files")
+    });
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    ui.painter().galley(before_pos, before, tokens.muted.egui());
+    ui.painter().galley(link_pos, link, tokens.accent.egui());
+    ui.painter().galley(after_pos, after, tokens.muted.egui());
+    if response.hovered() || response.has_focus() {
+        ui.painter().line_segment(
+            [
+                egui::pos2(link_rect.left() + 2.0, link_rect.bottom()),
+                egui::pos2(link_rect.right() - 2.0, link_rect.bottom()),
+            ],
+            Stroke::new(1.0, tokens.accent.egui()),
+        );
+    }
+
+    response.clicked()
+        || (response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            }))
 }
 
 fn dashed_rect(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
@@ -171,7 +211,7 @@ fn planning(ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens) {
 }
 
 fn failed(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui, error: String) {
-    let tokens = app.preferences.tokens();
+    let tokens = app.tokens();
     ui.vertical_centered(|ui| {
         ui.add_space(120.0);
         ui.label(
@@ -202,7 +242,7 @@ fn failed(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui, 
 }
 
 fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
-    let tokens = app.preferences.tokens();
+    let tokens = app.tokens();
     let running = app.is_running();
     if running {
         running_queue(app, ui, &tokens);

@@ -89,6 +89,14 @@ impl fmt::Display for GlassError {
 
 impl std::error::Error for GlassError {}
 
+/// Ask the native window manager to round a top-level window's corners.
+///
+/// Windows automatically suppresses rounding while the window is maximized. Callers should
+/// treat an error as an unsupported-platform fallback rather than a fatal application error.
+pub fn set_rounded_corners(window: &impl HasWindowHandle) -> Result<(), GlassError> {
+    platform::set_rounded_corners(window)
+}
+
 /// A thread-affine native material attached to one window.
 ///
 /// Create, update, and drop this value on the window's UI thread. Dropping it detaches the
@@ -138,6 +146,12 @@ mod platform;
 #[cfg(not(windows))]
 mod platform {
     use super::*;
+
+    pub(super) fn set_rounded_corners(_window: &impl HasWindowHandle) -> Result<(), GlassError> {
+        Err(GlassError::Platform(
+            "native rounded corners are available only on Windows".into(),
+        ))
+    }
 
     pub(super) struct Backend;
 

@@ -2,7 +2,7 @@ use super::{GlassConfig, GlassError, GlassStatus};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     ffi::c_void,
-    mem::size_of,
+    mem::{size_of, size_of_val},
     sync::{Mutex, OnceLock},
 };
 use windows::{
@@ -22,7 +22,11 @@ use windows::{
         Foundation::{E_INVALIDARG, HWND, LPARAM, LRESULT, WPARAM},
         Graphics::{
             Direct2D::CLSID_D2D1GaussianBlur,
-            Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute},
+            Dwm::{
+                DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+                DwmSetWindowAttribute,
+            },
+            Gdi::{CreateRoundRectRgn, DeleteObject, HGDIOBJ, SetWindowRgn},
         },
         System::{
             LibraryLoader::GetModuleHandleW,
@@ -38,16 +42,90 @@ use windows::{
                 RO_INIT_SINGLETHREADED, RoInitialize, RoUninitialize,
             },
         },
-        UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, IsIconic,
-            IsWindowVisible, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-            SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSW,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+        UI::{
+            HiDpi::GetDpiForWindow,
+            WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, IsIconic,
+                IsWindowVisible, IsZoomed, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
+                SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+                WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+                WS_POPUP,
+            },
         },
     },
     core::{Error, HSTRING, Interface, PCWSTR, Result as WindowsResult, implement, w},
 };
 use windows_numerics::Vector2;
+
+pub(super) fn set_rounded_corners(window: &impl HasWindowHandle) -> Result<(), GlassError> {
+    let handle = window
+        .window_handle()
+        .map_err(|error| GlassError::Platform(error.to_string()))?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return Err(GlassError::UnsupportedWindowHandle);
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut c_void);
+    set_rounded_corners_for_hwnd(hwnd)
+}
+
+fn set_rounded_corners_for_hwnd(hwnd: HWND) -> Result<(), GlassError> {
+    let preference = DWMWCP_ROUND;
+    // SAFETY: hwnd is a live top-level window and DwmSetWindowAttribute copies the fixed-size
+    // corner-preference value during this call.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as *const c_void,
+            size_of_val(&preference) as u32,
+        )
+        .map_err(|error| platform_error_at("set rounded window corners", error))
+    }?;
+    sync_rounded_window_region(hwnd)
+}
+
+fn sync_rounded_window_region(hwnd: HWND) -> Result<(), GlassError> {
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    // SAFETY: hwnd is a live top-level window and rect is valid for the synchronous call.
+    unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(platform_error)?;
+    let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    apply_window_region(
+        hwnd,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        maximized,
+    )
+}
+
+fn apply_window_region(
+    hwnd: HWND,
+    width: i32,
+    height: i32,
+    maximized: bool,
+) -> Result<(), GlassError> {
+    if maximized {
+        // SAFETY: a null region restores the complete rectangular window while maximized.
+        if unsafe { SetWindowRgn(hwnd, None, true) } == 0 {
+            return Err(platform_error(Error::from_thread()));
+        }
+        return Ok(());
+    }
+
+    // Windows 11's standard top-level corner radius is 8 device-independent pixels.
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let radius = (8_i32 * dpi as i32 + 48) / 96;
+    // CreateRoundRectRgn excludes the lower and right edges, hence the inclusive +1 bounds.
+    let region = unsafe { CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2) };
+    if region.0.is_null() {
+        return Err(platform_error(Error::from_thread()));
+    }
+    // On success Windows owns the region. On failure it remains ours and must be deleted.
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
+        return Err(platform_error(Error::from_thread()));
+    }
+    Ok(())
+}
 
 pub(super) struct Backend {
     host_hwnd: HWND,
@@ -61,6 +139,7 @@ pub(super) struct Backend {
     _host_backdrop: CompositionBackdropBrush,
     _blur_brush: CompositionEffectBrush,
     blur_radius: f32,
+    backdrop_region_state: Option<(i32, i32, bool)>,
     initialized_winrt: bool,
 }
 
@@ -156,6 +235,7 @@ impl Backend {
             _host_backdrop: host_backdrop,
             _blur_brush: blur_brush,
             blur_radius: config.blur_radius,
+            backdrop_region_state: None,
             initialized_winrt,
         })
     }
@@ -182,7 +262,7 @@ impl Backend {
         GlassStatus::Active
     }
 
-    fn sync_backdrop_window(&self) -> Result<(), GlassError> {
+    fn sync_backdrop_window(&mut self) -> Result<(), GlassError> {
         // SAFETY: host_hwnd is owned by the caller for Backend's lifetime.
         if unsafe {
             !IsWindowVisible(self.host_hwnd).as_bool() || IsIconic(self.host_hwnd).as_bool()
@@ -205,8 +285,16 @@ impl Backend {
                 rect.bottom - rect.top,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
-            .map_err(platform_error)
+            .map_err(platform_error)?;
         }
+        let state = (rect.right - rect.left, rect.bottom - rect.top, unsafe {
+            IsZoomed(self.host_hwnd).as_bool()
+        });
+        if self.backdrop_region_state != Some(state) {
+            apply_window_region(self.backdrop.hwnd, state.0, state.1, state.2)?;
+            self.backdrop_region_state = Some(state);
+        }
+        Ok(())
     }
 }
 
@@ -270,6 +358,9 @@ impl BackdropWindow {
             )
         }
         .map_err(platform_error)?;
+        // Match the companion material to the host's DWM-clipped outline. Corner preference is
+        // cosmetic, so unsupported Windows versions must not disable the glass fallback.
+        let _ = set_rounded_corners_for_hwnd(hwnd);
         // SAFETY: showing without activation cannot steal focus from the host.
         let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         Ok(Self { hwnd })

@@ -3,6 +3,7 @@
 mod app;
 mod settings;
 mod theme;
+mod theme_catalog;
 mod windows;
 mod workbench;
 

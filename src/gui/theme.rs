@@ -1,49 +1,88 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::str::FromStr;
 
 use eframe::egui::{self, Color32, FontFamily, FontId, Stroke, TextStyle};
 use image_converter::RgbColor;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ThemeMode {
-    Light,
-    #[default]
-    Dark,
-    Glass,
-    Custom,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct HexColor(pub [u8; 4]);
+
+impl<'de> Deserialize<'de> for HexColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredColor {
+            Rgba([u8; 4]),
+            Rgb([u8; 3]),
+        }
+
+        Ok(match StoredColor::deserialize(deserializer)? {
+            StoredColor::Rgba(rgba) => Self(rgba),
+            StoredColor::Rgb([r, g, b]) => Self([r, g, b, u8::MAX]),
+        })
+    }
 }
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct HexColor(pub [u8; 3]);
 
 impl HexColor {
     pub fn egui(self) -> Color32 {
-        Color32::from_rgb(self.0[0], self.0[1], self.0[2])
+        Color32::from_rgba_unmultiplied(self.0[0], self.0[1], self.0[2], self.0[3])
+    }
+
+    pub fn rgb(self) -> [u8; 3] {
+        [self.0[0], self.0[1], self.0[2]]
     }
 }
 
 impl std::fmt::Display for HexColor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{:02X}{:02X}{:02X}", self.0[0], self.0[1], self.0[2])
+        if self.0[3] == u8::MAX {
+            write!(f, "#{:02X}{:02X}{:02X}", self.0[0], self.0[1], self.0[2])
+        } else {
+            write!(
+                f,
+                "#{:02X}{:02X}{:02X}{:02X}",
+                self.0[0], self.0[1], self.0[2], self.0[3]
+            )
+        }
     }
 }
 
 impl FromStr for HexColor {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let parsed = value.parse::<RgbColor>()?;
-        Ok(Self(parsed.components()))
+        if !value.starts_with('#') || !matches!(value.len(), 7 | 9) {
+            return Err("expected #RRGGBB or #RRGGBBAA".to_owned());
+        }
+        let parse_byte = |start| {
+            u8::from_str_radix(&value[start..start + 2], 16)
+                .map_err(|_| "expected hexadecimal color digits".to_owned())
+        };
+        Ok(Self([
+            parse_byte(1)?,
+            parse_byte(3)?,
+            parse_byte(5)?,
+            if value.len() == 9 {
+                parse_byte(7)?
+            } else {
+                u8::MAX
+            },
+        ]))
     }
 }
 
 impl From<RgbColor> for HexColor {
     fn from(value: RgbColor) -> Self {
-        Self(value.components())
+        let [r, g, b] = value.components();
+        Self([r, g, b, u8::MAX])
+    }
+}
+
+impl From<Color32> for HexColor {
+    fn from(value: Color32) -> Self {
+        Self(value.to_srgba_unmultiplied())
     }
 }
 
@@ -75,7 +114,7 @@ pub struct ThemeTokens {
 }
 
 const fn hex(r: u8, g: u8, b: u8) -> HexColor {
-    HexColor([r, g, b])
+    HexColor([r, g, b, u8::MAX])
 }
 
 impl ThemeTokens {
@@ -144,138 +183,77 @@ impl ThemeTokens {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(default)]
-pub struct Preferences {
-    pub active_theme: ThemeMode,
-    pub custom_tokens: ThemeTokens,
-    pub jpeg_background: HexColor,
-    pub glass_translucency: u8,
-    pub glass_blur: u8,
-    pub solid_when_inactive: bool,
-}
-
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            active_theme: ThemeMode::Dark,
-            custom_tokens: ThemeTokens::dark(),
-            jpeg_background: HexColor::from(RgbColor::WHITE),
-            glass_translucency: 72,
-            glass_blur: 18,
-            solid_when_inactive: false,
-        }
-    }
-}
-
-impl Preferences {
-    pub fn tokens(&self) -> ThemeTokens {
-        match self.active_theme {
-            ThemeMode::Light => ThemeTokens::light(),
-            ThemeMode::Dark => ThemeTokens::dark(),
-            ThemeMode::Glass => ThemeTokens::glass(),
-            ThemeMode::Custom => self.custom_tokens.clone(),
-        }
-    }
-
-    pub fn load() -> Self {
-        Self::load_from(&settings_path())
-    }
-
-    pub fn load_from(path: &Path) -> Self {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
-    }
-
-    pub fn save(&self) -> Result<(), String> {
-        self.save_to(&settings_path())
-    }
-
-    pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(path, json).map_err(|e| e.to_string())
-    }
-
-    pub fn apply(&self, context: &egui::Context) {
-        let t = self.tokens();
-        let theme = if self.active_theme == ThemeMode::Light {
-            egui::Theme::Light
-        } else {
-            egui::Theme::Dark
-        };
-        context.set_theme(if theme == egui::Theme::Light {
-            egui::ThemePreference::Light
-        } else {
-            egui::ThemePreference::Dark
-        });
-        let mut style = (*context.style_of(theme)).clone();
-        let mut visuals = if theme == egui::Theme::Light {
-            egui::Visuals::light()
-        } else {
-            egui::Visuals::dark()
-        };
-        visuals.panel_fill = t.background.egui();
-        visuals.window_fill = t.panel.egui();
-        visuals.faint_bg_color = t.row_alt.egui();
-        visuals.extreme_bg_color = t.field.egui();
-        visuals.override_text_color = Some(t.text.egui());
-        visuals.selection.bg_fill = t.accent.egui();
-        visuals.selection.stroke = Stroke::new(1.0, t.on_accent.egui());
-        visuals.hyperlink_color = t.accent.egui();
-        visuals.widgets.inactive.bg_fill = t.control.egui();
-        visuals.widgets.inactive.weak_bg_fill = t.control.egui();
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, t.border.egui());
-        visuals.widgets.hovered.bg_fill = mix(t.control.egui(), t.accent.egui(), 0.16);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, t.accent.egui());
-        visuals.widgets.active.bg_fill = t.accent.egui();
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0, t.on_accent.egui());
-        visuals.widgets.open.bg_fill = t.control.egui();
-        visuals.window_stroke = Stroke::new(1.0, t.border.egui());
-        style.visuals = visuals;
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(10.0, 6.0);
-        style.visuals.widgets.inactive.corner_radius = 6.0.into();
-        style.visuals.widgets.hovered.corner_radius = 6.0.into();
-        style.visuals.widgets.active.corner_radius = 6.0.into();
-        style.text_styles.insert(
-            TextStyle::Heading,
-            FontId::new(18.0, FontFamily::Proportional),
-        );
-        style
-            .text_styles
-            .insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
-        style.text_styles.insert(
-            TextStyle::Monospace,
-            FontId::new(11.5, FontFamily::Monospace),
-        );
-        style.text_styles.insert(
-            TextStyle::Button,
-            FontId::new(12.5, FontFamily::Proportional),
-        );
-        context.set_style_of(theme, style);
-    }
+pub fn apply(context: &egui::Context, tokens: &ThemeTokens) {
+    let t = tokens;
+    let brightness = (u16::from(t.background.0[0]) * 299
+        + u16::from(t.background.0[1]) * 587
+        + u16::from(t.background.0[2]) * 114)
+        / 1000;
+    let theme = if brightness >= 128 {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    context.set_theme(if theme == egui::Theme::Light {
+        egui::ThemePreference::Light
+    } else {
+        egui::ThemePreference::Dark
+    });
+    let mut style = (*context.style_of(theme)).clone();
+    let mut visuals = if theme == egui::Theme::Light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    visuals.panel_fill = t.background.egui();
+    visuals.window_fill = t.panel.egui();
+    visuals.faint_bg_color = t.row_alt.egui();
+    visuals.extreme_bg_color = t.field.egui();
+    visuals.override_text_color = Some(t.text.egui());
+    visuals.selection.bg_fill = t.accent.egui();
+    visuals.selection.stroke = Stroke::new(1.0, t.on_accent.egui());
+    visuals.hyperlink_color = t.accent.egui();
+    visuals.widgets.inactive.bg_fill = t.control.egui();
+    visuals.widgets.inactive.weak_bg_fill = t.control.egui();
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, t.border.egui());
+    visuals.widgets.hovered.bg_fill = mix(t.control.egui(), t.accent.egui(), 0.16);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, t.accent.egui());
+    visuals.widgets.active.bg_fill = t.accent.egui();
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, t.on_accent.egui());
+    visuals.widgets.open.bg_fill = t.control.egui();
+    visuals.window_stroke = Stroke::new(1.0, t.border.egui());
+    style.visuals = visuals;
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    style.visuals.widgets.inactive.corner_radius = 6.0.into();
+    style.visuals.widgets.hovered.corner_radius = 6.0.into();
+    style.visuals.widgets.active.corner_radius = 6.0.into();
+    style.text_styles.insert(
+        TextStyle::Heading,
+        FontId::new(18.0, FontFamily::Proportional),
+    );
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(11.5, FontFamily::Monospace),
+    );
+    style.text_styles.insert(
+        TextStyle::Button,
+        FontId::new(12.5, FontFamily::Proportional),
+    );
+    context.set_style_of(theme, style);
 }
 
 fn mix(a: Color32, b: Color32, amount: f32) -> Color32 {
     let blend = |x, y| (f32::from(x) * (1.0 - amount) + f32::from(y) * amount).round() as u8;
-    Color32::from_rgb(
+    Color32::from_rgba_unmultiplied(
         blend(a.r(), b.r()),
         blend(a.g(), b.g()),
         blend(a.b(), b.b()),
+        blend(a.a(), b.a()),
     )
-}
-
-fn settings_path() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Convertalot")
-        .join("settings.json")
 }
 
 #[cfg(test)]
@@ -288,28 +266,20 @@ mod tests {
             "#0f9D84".parse::<HexColor>().unwrap(),
             hex(0x0f, 0x9d, 0x84)
         );
+        assert_eq!(
+            "#0f9D8480".parse::<HexColor>().unwrap(),
+            HexColor([0x0f, 0x9d, 0x84, 0x80])
+        );
+        assert_eq!(
+            serde_json::from_str::<HexColor>("[15,157,132]").unwrap(),
+            hex(0x0f, 0x9d, 0x84)
+        );
+        assert_eq!(HexColor([0x0f, 0x9d, 0x84, 0x80]).to_string(), "#0F9D8480");
+        assert_eq!(
+            HexColor::from(Color32::from_rgba_unmultiplied(86, 154, 159, 228)),
+            HexColor([86, 154, 159, 228])
+        );
         assert!("0f9d84".parse::<HexColor>().is_err());
-    }
-
-    #[test]
-    fn persistence_round_trip_and_corruption_fallback() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("settings.json");
-        let mut preferences = Preferences {
-            active_theme: ThemeMode::Light,
-            glass_translucency: 63,
-            glass_blur: 27,
-            ..Default::default()
-        };
-        preferences.custom_tokens.accent = hex(1, 2, 3);
-        preferences.save_to(&path).unwrap();
-        assert_eq!(Preferences::load_from(&path), preferences);
-        fs::write(&path, r#"{"active_theme":"glass","glass_tint":8}"#).unwrap();
-        let migrated = Preferences::load_from(&path);
-        assert_eq!(migrated.active_theme, ThemeMode::Glass);
-        assert_eq!(migrated.glass_translucency, 72);
-        assert_eq!(migrated.glass_blur, 18);
-        fs::write(&path, "{ definitely not json").unwrap();
-        assert_eq!(Preferences::load_from(&path), Preferences::default());
+        assert!("#0f9d848".parse::<HexColor>().is_err());
     }
 }
