@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod icon;
 mod settings;
 mod theme;
 mod theme_catalog;
@@ -13,6 +14,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Convertalot")
+            .with_icon(icon::window_icon())
             .with_inner_size([900.0, 620.0])
             .with_min_inner_size([720.0, 520.0])
             .with_decorations(false)

@@ -32,6 +32,10 @@ pub(crate) fn title_bar(app: &mut ConvertalotApp, root: &mut egui::Ui) {
                 context.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
             ui.horizontal(|ui| {
+                ui.add(
+                    egui::Image::new(&app.title_icon).fit_to_exact_size(egui::vec2(26.0, 26.0)),
+                );
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new("CONVERTALOT")
                         .strong()

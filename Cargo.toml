@@ -1,6 +1,6 @@
 [package]
 name = "image-converter"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Fast Windows image conversion for the desktop and command line"
 
