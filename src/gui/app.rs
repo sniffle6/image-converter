@@ -413,6 +413,25 @@ impl ConvertalotApp {
         self.screen = Screen::Workbench;
     }
 
+    pub(crate) fn remove_queued_item(&mut self, id: ItemId) {
+        if self.phase != Phase::Ready {
+            return;
+        }
+
+        self.rows.rows.retain(|row| row.id != id);
+        self.source_inputs = self.rows.rows.iter().map(|row| row.input.clone()).collect();
+
+        if self.source_inputs.is_empty() {
+            self.clear();
+            return;
+        }
+
+        if let Some(plan) = &mut self.plan {
+            plan.items.retain(|item| item.id != id);
+            plan.request.inputs = self.source_inputs.clone();
+        }
+    }
+
     pub fn request(&self) -> ConversionRequest {
         ConversionRequest {
             inputs: self.source_inputs.clone(),

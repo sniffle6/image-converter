@@ -455,8 +455,11 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
         });
     });
     ui.add_space(4.0);
-    if let Some(row_index) = queue_table(app, ui, &tokens) {
-        app.open_preview(row_index, context);
+    if let Some(action) = queue_table(app, ui, &tokens, app.phase == Phase::Ready) {
+        match action {
+            QueueRowAction::Preview(row_index) => app.open_preview(row_index, context),
+            QueueRowAction::Remove(id) => app.remove_queued_item(id),
+        }
         return;
     }
     for failure in &app.planning_failures {
@@ -568,7 +571,7 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
 }
 
 fn running_queue(app: &mut ConvertalotApp, ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens) {
-    if let Some(row_index) = queue_table(app, ui, tokens) {
+    if let Some(QueueRowAction::Preview(row_index)) = queue_table(app, ui, tokens, false) {
         let context = ui.ctx().clone();
         app.open_preview(row_index, &context);
         return;
@@ -638,7 +641,8 @@ fn queue_table(
     app: &ConvertalotApp,
     ui: &mut egui::Ui,
     tokens: &crate::theme::ThemeTokens,
-) -> Option<usize> {
+    removable: bool,
+) -> Option<QueueRowAction> {
     let width = ui.available_width();
     let panel_fill = tokens.panel.egui();
     let mut clicked_row = None;
@@ -654,13 +658,18 @@ fn queue_table(
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (index, row) in app.rows.rows.iter().enumerate() {
-                        if queue_row(ui, tokens, row, index, width) {
-                            clicked_row = Some(index);
+                        if let Some(action) = queue_row(ui, tokens, row, index, width, removable) {
+                            clicked_row = Some(action);
                         }
                     }
                 });
         });
     clicked_row
+}
+
+enum QueueRowAction {
+    Preview(usize),
+    Remove(image_converter::ItemId),
 }
 
 fn queue_header(ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens, width: f32) {
@@ -694,16 +703,51 @@ fn queue_row(
     row: &crate::app::QueueRow,
     index: usize,
     width: f32,
-) -> bool {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
-    if response.hovered() || response.has_focus() {
+    removable: bool,
+) -> Option<QueueRowAction> {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
+    let remove_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - 36.0, rect.top()),
+        rect.right_bottom(),
+    );
+    let preview_rect = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(
+            if removable {
+                remove_rect.left()
+            } else {
+                rect.right()
+            },
+            rect.bottom(),
+        ),
+    );
+    let response = ui.interact(
+        preview_rect,
+        ui.id().with(("queue-preview", row.id.0)),
+        egui::Sense::click(),
+    );
+    let remove_response = removable.then(|| {
+        ui.interact(
+            remove_rect,
+            ui.id().with(("queue-remove", row.id.0)),
+            egui::Sense::click(),
+        )
+        .on_hover_text(format!("Remove {} from queue", row.input.display()))
+    });
+    let row_active = response.hovered()
+        || response.has_focus()
+        || remove_response
+            .as_ref()
+            .is_some_and(|response| response.hovered() || response.has_focus());
+    if row_active {
         ui.painter().rect_filled(rect, 0.0, tokens.control.egui());
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if index % 2 == 1 {
         ui.painter().rect_filled(rect, 0.0, tokens.row_alt.egui());
     }
-    let [file_rect, size_rect, status_rect] =
-        queue_column_rects(rect.shrink2(egui::vec2(12.0, 0.0)));
+    let content_rect = egui::Rect::from_min_max(rect.min, preview_rect.right_bottom())
+        .shrink2(egui::vec2(12.0, 0.0));
+    let [file_rect, size_rect, status_rect] = queue_column_rects(content_rect);
     let name = row
         .input
         .file_name()
@@ -734,6 +778,35 @@ fn queue_row(
         tokens.muted.egui(),
     );
     queue_status(ui, tokens, row, status_rect);
+    if let Some(remove_response) = &remove_response {
+        let color = if remove_response.hovered() || remove_response.has_focus() {
+            tokens.danger.egui()
+        } else {
+            tokens.muted.egui()
+        };
+        ui.painter().text(
+            remove_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(17.0),
+            color,
+        );
+        remove_response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                format!("Remove {name} from queue"),
+            )
+        });
+        if remove_response.clicked()
+            || (remove_response.has_focus()
+                && ui.input(|input| {
+                    input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+                }))
+        {
+            return Some(QueueRowAction::Remove(row.id));
+        }
+    }
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
             egui::WidgetType::Button,
@@ -741,11 +814,12 @@ fn queue_row(
             format!("Preview {name}"),
         )
     });
-    response.clicked()
+    (response.clicked()
         || (response.has_focus()
             && ui.input(|input| {
                 input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
-            }))
+            })))
+    .then_some(QueueRowAction::Preview(index))
 }
 
 fn queue_column_rects(rect: egui::Rect) -> [egui::Rect; 3] {
