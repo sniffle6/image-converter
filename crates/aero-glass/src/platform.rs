@@ -43,13 +43,14 @@ use windows::{
             },
         },
         UI::{
+            Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             HiDpi::GetDpiForWindow,
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, IsIconic,
-                IsWindowVisible, IsZoomed, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-                SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
-                WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-                WS_POPUP,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, EVENT_SYSTEM_MINIMIZESTART,
+                GetWindowRect, IsIconic, IsWindowVisible, IsZoomed, RegisterClassW, SW_HIDE,
+                SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
+                WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WNDCLASSW, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -130,6 +131,7 @@ fn apply_window_region(
 pub(super) struct Backend {
     host_hwnd: HWND,
     backdrop: BackdropWindow,
+    minimize_hook: MinimizeHook,
     _queue: DispatcherQueueController,
     compositor: Compositor,
     _target: windows::UI::Composition::Desktop::DesktopWindowTarget,
@@ -184,6 +186,7 @@ impl Backend {
             .map_err(|error| platform_error_at("create dispatcher queue", error))?;
 
         let backdrop = BackdropWindow::create()?;
+        let minimize_hook = MinimizeHook::install(host_hwnd, backdrop.hwnd)?;
         enable_host_backdrop(backdrop.hwnd, true)?;
         let compositor =
             Compositor::new().map_err(|error| platform_error_at("create compositor", error))?;
@@ -226,6 +229,7 @@ impl Backend {
         Ok(Self {
             host_hwnd,
             backdrop,
+            minimize_hook,
             _queue: queue,
             compositor,
             _target: target,
@@ -300,6 +304,7 @@ impl Backend {
 
 impl Drop for Backend {
     fn drop(&mut self) {
+        self.minimize_hook.uninstall();
         let _ = self._target.SetRoot(None::<&Visual>);
         let _ = enable_host_backdrop(self.backdrop.hwnd, false);
         if self.initialized_winrt {
@@ -307,6 +312,106 @@ impl Drop for Backend {
             // RoInitialize successfully.
             unsafe { RoUninitialize() };
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MinimizeRegistration {
+    host: usize,
+    backdrop: usize,
+}
+
+static MINIMIZE_REGISTRATIONS: Mutex<Vec<MinimizeRegistration>> = Mutex::new(Vec::new());
+
+struct MinimizeHook {
+    handle: Option<HWINEVENTHOOK>,
+    registration: MinimizeRegistration,
+}
+
+impl MinimizeHook {
+    fn install(host: HWND, backdrop: HWND) -> Result<Self, GlassError> {
+        let registration = MinimizeRegistration {
+            host: host.0 as usize,
+            backdrop: backdrop.0 as usize,
+        };
+        minimize_registrations().push(registration);
+
+        // Restrict the hook to the host's UI thread. Out-of-context callbacks are delivered on
+        // this thread's message loop, so the companion window remains thread-affine.
+        let thread_id = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(host, None)
+        };
+        let handle = unsafe {
+            SetWinEventHook(
+                EVENT_SYSTEM_MINIMIZESTART,
+                EVENT_SYSTEM_MINIMIZESTART,
+                None,
+                Some(minimize_event),
+                0,
+                thread_id,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if handle.is_invalid() {
+            remove_minimize_registration(registration);
+            return Err(platform_error_at(
+                "listen for host window minimization",
+                Error::from_thread(),
+            ));
+        }
+
+        Ok(Self {
+            handle: Some(handle),
+            registration,
+        })
+    }
+
+    fn uninstall(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            // SAFETY: this hook was created by install and is unhooked exactly once.
+            let _ = unsafe { UnhookWinEvent(handle) };
+            remove_minimize_registration(self.registration);
+        }
+    }
+}
+
+impl Drop for MinimizeHook {
+    fn drop(&mut self) {
+        self.uninstall();
+    }
+}
+
+fn minimize_registrations() -> std::sync::MutexGuard<'static, Vec<MinimizeRegistration>> {
+    MINIMIZE_REGISTRATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn remove_minimize_registration(registration: MinimizeRegistration) {
+    minimize_registrations()
+        .retain(|entry| entry.host != registration.host || entry.backdrop != registration.backdrop);
+}
+
+unsafe extern "system" fn minimize_event(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _object_id: i32,
+    _child_id: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    if event != EVENT_SYSTEM_MINIMIZESTART {
+        return;
+    }
+    let host = hwnd.0 as usize;
+    let backdrop = minimize_registrations()
+        .iter()
+        .find(|entry| entry.host == host)
+        .map(|entry| entry.backdrop);
+    if let Some(backdrop) = backdrop {
+        // SAFETY: the registered companion HWND remains live until its hook is uninstalled.
+        let _ = unsafe { ShowWindow(HWND(backdrop as *mut c_void), SW_HIDE) };
     }
 }
 
