@@ -1,6 +1,6 @@
 # App icon
 
-Convertalot uses the Camelot castle artwork from `Convertalot_App_Icon_Package/` as its application icon.
+Convertalot uses `assets/convertalot-icon.png` as the source artwork for its application icon.
 
 ## What you see
 
@@ -10,13 +10,15 @@ Convertalot uses the Camelot castle artwork from `Convertalot_App_Icon_Package/`
 
 ## How to change it
 
-1. Replace the files in `assets/` (`convertalot.ico`, `convertalot-256.png`, `convertalot-32.png`).
-2. Rebuild. `build.rs` re-embeds the `.ico`; the PNGs are compiled into the GUI via `include_bytes!`.
+1. Replace `assets/convertalot-icon.png` with square RGBA source artwork.
+2. Regenerate `convertalot.ico`, `convertalot-256.png`, and `convertalot-32.png` from that source.
+3. Rebuild. `build.rs` re-embeds the `.ico`; the PNGs are compiled into the GUI via `include_bytes!`.
 
-The icon pack is the source artwork (other platforms, extra sizes). The app only needs the three files in `assets/`.
+Keep the source artwork and all three generated files in `assets/` so future replacements have a clear source of truth.
 
 ## Key files
 
+- `assets/convertalot-icon.png` — full-size source artwork
 - `assets/convertalot.ico` — Windows exe resource
 - `assets/convertalot-256.png` — window / taskbar
 - `assets/convertalot-32.png` — title bar
