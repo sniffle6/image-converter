@@ -44,12 +44,11 @@ pub(crate) fn title_bar(app: &mut ConvertalotApp, root: &mut egui::Ui) {
                         .color(tokens.title_text.egui()),
                 );
                 ui.add(egui::Separator::default().vertical().spacing(5.0));
-                let subtitle = if app.screen == Screen::Appearance {
-                    "settings"
-                } else if app.is_running() {
-                    "converting…"
-                } else {
-                    "batch image converter"
+                let subtitle = match app.screen {
+                    Screen::Appearance => "settings",
+                    Screen::Preview => "image preview",
+                    Screen::Workbench if app.is_running() => "converting…",
+                    Screen::Workbench => "batch image converter",
                 };
                 ui.label(RichText::new(subtitle).monospace().size(11.0).color(
                     if app.is_running() {

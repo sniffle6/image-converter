@@ -18,6 +18,174 @@ pub(crate) fn show(app: &mut ConvertalotApp, root: &mut egui::Ui, context: &egui
         });
 }
 
+pub(crate) fn show_preview(app: &mut ConvertalotApp, root: &mut egui::Ui, context: &egui::Context) {
+    if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+        app.close_preview();
+        return;
+    }
+
+    let Some(preview) = app.preview.as_ref() else {
+        app.close_preview();
+        return;
+    };
+    let row_index = preview.row_index;
+    let input = preview.input.clone();
+    let byte_size = preview.byte_size;
+    let dimensions = preview.dimensions;
+    let texture = preview.texture.clone();
+    let error = preview.error.clone();
+    let row_count = app.rows.rows.len();
+    let tokens = app.tokens();
+    let background_fill = app.backdrop_fill(tokens.background);
+    let mut close = false;
+    let mut navigate_to = None;
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(background_fill).inner_margin(20.0))
+        .show(root, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(RichText::new("←  Back to queue").size(12.0))
+                    .on_hover_text("Back to queue (Esc)")
+                    .clicked()
+                {
+                    close = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(row_index + 1 < row_count, egui::Button::new("Next  →"))
+                        .on_hover_text("Preview next image (Right arrow)")
+                        .clicked()
+                    {
+                        navigate_to = Some(row_index + 1);
+                    }
+                    if ui
+                        .add_enabled(row_index > 0, egui::Button::new("←  Previous"))
+                        .on_hover_text("Preview previous image (Left arrow)")
+                        .clicked()
+                    {
+                        navigate_to = Some(row_index - 1);
+                    }
+                });
+            });
+
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        input
+                            .file_name()
+                            .map(|name| name.to_string_lossy())
+                            .unwrap_or_default(),
+                    )
+                    .strong()
+                    .size(15.0)
+                    .color(tokens.text.egui()),
+                )
+                .truncate(),
+            );
+
+            ui.horizontal(|ui| {
+                let dimensions = dimensions
+                    .map(|(width, height)| format!("{width} × {height} px"))
+                    .unwrap_or_else(|| "dimensions unavailable".to_owned());
+                ui.label(
+                    RichText::new(format!(
+                        "{}  ·  {}  ·  {} of {}",
+                        dimensions,
+                        human_size(byte_size),
+                        row_index + 1,
+                        row_count
+                    ))
+                    .monospace()
+                    .size(10.5)
+                    .color(tokens.muted.egui()),
+                );
+            });
+            ui.label(
+                RichText::new(input.display().to_string())
+                    .monospace()
+                    .size(10.0)
+                    .color(tokens.muted.egui()),
+            );
+            ui.add_space(4.0);
+
+            let available = ui.available_size();
+            let (canvas, _) = ui.allocate_exact_size(
+                egui::vec2(available.x, available.y.max(160.0)),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect_filled(canvas, 8.0, tokens.panel.egui());
+            ui.painter().rect_stroke(
+                canvas,
+                8.0,
+                Stroke::new(1.0, tokens.border.egui()),
+                egui::StrokeKind::Inside,
+            );
+
+            if let Some(texture) = texture {
+                paint_checkerboard(ui.painter(), canvas.shrink(1.0), &tokens);
+                let natural = texture.size_vec2();
+                let bounds = canvas.shrink(18.0).size();
+                let scale = (bounds.x / natural.x).min(bounds.y / natural.y).min(1.0);
+                let display_size = natural * scale;
+                let image_rect = egui::Rect::from_center_size(canvas.center(), display_size);
+                ui.put(
+                    image_rect,
+                    egui::Image::new(&texture).fit_to_exact_size(display_size),
+                );
+            } else if let Some(error) = error {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(canvas), |ui| {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(RichText::new(error).size(12.0).color(tokens.danger.egui()));
+                    });
+                });
+            }
+        });
+
+    if context.input(|input| input.key_pressed(egui::Key::ArrowLeft)) && row_index > 0 {
+        navigate_to = Some(row_index - 1);
+    }
+    if context.input(|input| input.key_pressed(egui::Key::ArrowRight)) && row_index + 1 < row_count
+    {
+        navigate_to = Some(row_index + 1);
+    }
+    if close {
+        app.close_preview();
+    } else if let Some(row_index) = navigate_to {
+        app.open_preview(row_index, context);
+    }
+}
+
+fn paint_checkerboard(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    tokens: &crate::theme::ThemeTokens,
+) {
+    let cell = 16.0;
+    let mut row = 0usize;
+    let mut y = rect.top();
+    while y < rect.bottom() {
+        let mut column = 0usize;
+        let mut x = rect.left();
+        while x < rect.right() {
+            let tile = egui::Rect::from_min_max(
+                egui::pos2(x, y),
+                egui::pos2((x + cell).min(rect.right()), (y + cell).min(rect.bottom())),
+            );
+            let color = if (row + column).is_multiple_of(2) {
+                tokens.panel.egui()
+            } else {
+                tokens.control.egui()
+            };
+            painter.rect_filled(tile, 0.0, color);
+            column += 1;
+            x += cell;
+        }
+        row += 1;
+        y += cell;
+    }
+}
+
 fn empty(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
     let tokens = app.tokens();
     let panel_fill = app.backdrop_fill(tokens.panel);
@@ -287,7 +455,10 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
         });
     });
     ui.add_space(4.0);
-    queue_table(app, ui, &tokens);
+    if let Some(row_index) = queue_table(app, ui, &tokens) {
+        app.open_preview(row_index, context);
+        return;
+    }
     for failure in &app.planning_failures {
         ui.label(
             RichText::new(failure)
@@ -397,7 +568,11 @@ fn queue(app: &mut ConvertalotApp, context: &egui::Context, ui: &mut egui::Ui) {
 }
 
 fn running_queue(app: &mut ConvertalotApp, ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens) {
-    queue_table(app, ui, tokens);
+    if let Some(row_index) = queue_table(app, ui, tokens) {
+        let context = ui.ctx().clone();
+        app.open_preview(row_index, &context);
+        return;
+    }
 
     let completed = app.rows.completed();
     let total = app.rows.rows.len();
@@ -459,9 +634,14 @@ fn running_queue(app: &mut ConvertalotApp, ui: &mut egui::Ui, tokens: &crate::th
     );
 }
 
-fn queue_table(app: &ConvertalotApp, ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens) {
+fn queue_table(
+    app: &ConvertalotApp,
+    ui: &mut egui::Ui,
+    tokens: &crate::theme::ThemeTokens,
+) -> Option<usize> {
     let width = ui.available_width();
     let panel_fill = tokens.panel.egui();
+    let mut clicked_row = None;
     egui::Frame::new()
         .fill(panel_fill)
         .stroke(Stroke::new(1.0, tokens.border.egui()))
@@ -474,10 +654,13 @@ fn queue_table(app: &ConvertalotApp, ui: &mut egui::Ui, tokens: &crate::theme::T
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (index, row) in app.rows.rows.iter().enumerate() {
-                        queue_row(ui, tokens, row, index, width);
+                        if queue_row(ui, tokens, row, index, width) {
+                            clicked_row = Some(index);
+                        }
                     }
                 });
         });
+    clicked_row
 }
 
 fn queue_header(ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens, width: f32) {
@@ -491,7 +674,10 @@ fn queue_header(ui: &mut egui::Ui, tokens: &crate::theme::ThemeTokens, width: f3
         Stroke::new(1.0, tokens.border.egui()),
     );
     let columns = queue_column_rects(rect.shrink2(egui::vec2(12.0, 0.0)));
-    for (column, text) in columns.into_iter().zip(["FILE", "SIZE", "STATUS"]) {
+    for (column, text) in columns
+        .into_iter()
+        .zip(["FILE · CLICK TO PREVIEW", "SIZE", "STATUS"])
+    {
         ui.painter().text(
             column.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -508,9 +694,12 @@ fn queue_row(
     row: &crate::app::QueueRow,
     index: usize,
     width: f32,
-) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
-    if index % 2 == 1 {
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 0.0, tokens.control.egui());
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    } else if index % 2 == 1 {
         ui.painter().rect_filled(rect, 0.0, tokens.row_alt.egui());
     }
     let [file_rect, size_rect, status_rect] =
@@ -523,7 +712,7 @@ fn queue_row(
     ui.painter().with_clip_rect(file_rect).text(
         file_rect.left_center(),
         egui::Align2::LEFT_CENTER,
-        name,
+        &name,
         egui::FontId::new(11.5, egui::FontFamily::Monospace),
         tokens.text.egui(),
     );
@@ -545,6 +734,18 @@ fn queue_row(
         tokens.muted.egui(),
     );
     queue_status(ui, tokens, row, status_rect);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("Preview {name}"),
+        )
+    });
+    response.clicked()
+        || (response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            }))
 }
 
 fn queue_column_rects(rect: egui::Rect) -> [egui::Rect; 3] {

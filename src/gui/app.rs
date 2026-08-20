@@ -10,6 +10,7 @@ use std::{
 
 use aero_glass::{AeroGlass, GlassConfig, GlassStatus, InactiveBehavior};
 use eframe::egui;
+use image::GenericImageView;
 use image_converter::{
     BatchReport, ConversionEvent, ConversionPlan, ConversionRequest, Converter, DuplicateStyle,
     ItemId, OutputFormat, PlanError, ResizeMode, RgbColor,
@@ -32,7 +33,17 @@ pub(crate) enum ResizeChoice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Screen {
     Workbench,
+    Preview,
     Appearance,
+}
+
+pub(crate) struct ImagePreview {
+    pub row_index: usize,
+    pub input: PathBuf,
+    pub byte_size: u64,
+    pub dimensions: Option<(u32, u32)>,
+    pub texture: Option<egui::TextureHandle>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,6 +179,7 @@ pub(crate) struct ConvertalotApp {
     pub confirm_delete_theme: bool,
     pub planning_failures: Vec<String>,
     pub title_icon: egui::TextureHandle,
+    pub preview: Option<ImagePreview>,
     source_inputs: Vec<PathBuf>,
     plan: Option<ConversionPlan>,
     planner: Option<Receiver<PlannerMessage>>,
@@ -210,6 +222,7 @@ impl ConvertalotApp {
             confirm_delete_theme: false,
             planning_failures: Vec::new(),
             title_icon: crate::icon::title_icon(&context.egui_ctx),
+            preview: None,
             source_inputs: Vec::new(),
             plan: None,
             planner: None,
@@ -225,6 +238,50 @@ impl ConvertalotApp {
 
     pub fn is_running(&self) -> bool {
         self.phase == Phase::Running
+    }
+
+    pub(crate) fn open_preview(&mut self, row_index: usize, context: &egui::Context) {
+        let Some(row) = self.rows.rows.get(row_index) else {
+            return;
+        };
+        let input = row.input.clone();
+        let byte_size = row.byte_size;
+        let loaded = image::open(&input).map(|image| {
+            let dimensions = image.dimensions();
+            let image = image.thumbnail(2048, 2048).to_rgba8();
+            let size = [image.width() as usize, image.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+            let texture = context.load_texture(
+                format!("image-preview-{}", input.display()),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            (dimensions, texture)
+        });
+        self.preview = Some(match loaded {
+            Ok((dimensions, texture)) => ImagePreview {
+                row_index,
+                input,
+                byte_size,
+                dimensions: Some(dimensions),
+                texture: Some(texture),
+                error: None,
+            },
+            Err(error) => ImagePreview {
+                row_index,
+                input,
+                byte_size,
+                dimensions: None,
+                texture: None,
+                error: Some(format!("Could not decode this image: {error}")),
+            },
+        });
+        self.screen = Screen::Preview;
+    }
+
+    pub(crate) fn close_preview(&mut self) {
+        self.preview = None;
+        self.screen = Screen::Workbench;
     }
 
     pub(crate) fn backdrop_fill(&self, fallback: crate::theme::HexColor) -> egui::Color32 {
@@ -352,6 +409,8 @@ impl ConvertalotApp {
         self.planner = None;
         self.phase = Phase::Empty;
         self.planning_failures.clear();
+        self.preview = None;
+        self.screen = Screen::Workbench;
     }
 
     pub fn request(&self) -> ConversionRequest {
@@ -615,6 +674,7 @@ impl eframe::App for ConvertalotApp {
                 settings::conversion_sidebar(self, ui, &context);
                 workbench::show(self, ui, &context);
             }
+            Screen::Preview => workbench::show_preview(self, ui, &context),
             Screen::Appearance => settings::appearance(self, ui, &context),
         }
         windows::resize_handles(&context);
