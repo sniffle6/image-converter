@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -99,7 +99,9 @@ fn compile_gnu(work: &Path) {
 }
 
 fn compile_msvc(work: &Path) {
-    let rc = env::var("RC_PATH").unwrap_or_else(|_| "rc.exe".into());
+    // GitHub's windows-latest image (and VS Developer Prompt-less shells) have
+    // the Windows SDK installed, but rc.exe is not on PATH.
+    let rc = find_rc_exe();
     run(
         Command::new(&rc)
             .current_dir(work)
@@ -108,6 +110,72 @@ fn compile_msvc(work: &Path) {
     );
     let res = work.join("resource.res");
     println!("cargo:rustc-link-arg={}", res.display());
+}
+
+fn find_rc_exe() -> PathBuf {
+    if let Some(path) = env::var_os("RC_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+        panic!("RC_PATH does not point to rc.exe: {}", path.display());
+    }
+    if let Some(path) = find_on_path("rc.exe") {
+        return path;
+    }
+    if let Some(path) = find_windows_kit_rc() {
+        return path;
+    }
+    panic!(
+        "rc.exe not found. Install the Windows SDK, or set RC_PATH to the resource compiler."
+    );
+}
+
+fn find_on_path(exe: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(exe);
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+fn find_windows_kit_rc() -> Option<PathBuf> {
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default().as_str() {
+        "x86_64" => "x64",
+        "x86" => "x86",
+        "aarch64" => "arm64",
+        other => panic!("unsupported Windows arch {other} for rc.exe lookup"),
+    };
+    let mut found = Vec::new();
+    for root in [
+        PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin"),
+        PathBuf::from(r"C:\Program Files\Windows Kits\10\bin"),
+    ] {
+        let direct = root.join(arch).join("rc.exe");
+        if direct.is_file() {
+            found.push(direct);
+        }
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let version_dir = entry.path();
+            if !version_dir.is_dir() {
+                continue;
+            }
+            for candidate in [
+                version_dir.join(arch).join("rc.exe"),
+                version_dir.join("Hostx64").join(arch).join("rc.exe"),
+                version_dir.join("Hostx86").join(arch).join("rc.exe"),
+            ] {
+                if candidate.is_file() {
+                    found.push(candidate);
+                }
+            }
+        }
+    }
+    found.sort();
+    found.pop()
 }
 
 fn run(command: &mut Command, name: &str) {

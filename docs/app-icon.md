@@ -20,7 +20,7 @@ The icon pack is the source artwork (other platforms, extra sizes). The app only
 - `assets/convertalot.ico` — Windows exe resource
 - `assets/convertalot-256.png` — window / taskbar
 - `assets/convertalot-32.png` — title bar
-- `build.rs` — embeds the `.ico` on Windows (stages files in a temp dir so GNU `windres` does not choke on spaces in the repo path)
+- `build.rs` — embeds the `.ico` on Windows. GNU builds compile with `windres` from a space-free temp dir (the preprocessor splits unquoted paths). MSVC builds look up `rc.exe` in the Windows SDK; GitHub Actions does not put it on PATH.
 - `src/gui/icon.rs` — loads the PNGs
 - `src/gui/main.rs` — viewport icon
 - `src/gui/windows.rs` — title-bar image
